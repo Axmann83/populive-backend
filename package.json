@@ -1,0 +1,16 @@
+{
+  "name": "populive-backend",
+  "version": "1.0.0",
+  "description": "Backend PopuLive — API, WebSocket, motore a orari",
+  "main": "populive-api-server.js",
+  "scripts": {
+    "start": "node populive-api-server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "ioredis": "^5.4.1",
+    "pg": "^8.12.0",
+    "socket.io": "^4.7.5"
+  }
+}
