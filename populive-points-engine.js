@@ -5,20 +5,45 @@
  * Un solo posto dove vivono tutti i valori — quando li
  * bilanceremo con i dati reali dei test, si cambia solo qui,
  * non in dieci funzioni sparse per il codice.
- * Tutti i valori sono INDICATIVI, da tarare con i numeri veri.
  * ============================================================
  */
 
 const BASE_POINTS = {
-  like_received:          1,   // solo i primi N like/giorno per ricevente contano (rate limit già deciso)
-  superlike_received:     5,
-  profile_view:           1,   // segnale debole: qualcuno ha guardato il tuo profilo
-  rosa_standalone:        3,
-  rosa_like:              3,   // + eventuale bonus separato se vince il minigioco (vedi GUESS_GAME_BONUS_POINTS)
-  rosa_super:             5,
-  mission_completed:      8,   // missione sponsorizzata da brand
-  connector_discovery_bonus: 15, // Top Connector: bonus per aver "scoperto" un profilo che poi esplode
+  // Valori DEFINITIVI, decisi insieme — piccoli e interi apposta,
+  // per restare leggibili in classifica anche dopo mesi di utilizzo
+  // reale (mai rischiare numeri enormi difficili da confrontare).
+  profile_view:              2,   // solo la prima visita per coppia visitatore/visitato/serata, e solo le prime N persone diverse viste a testa (v. MAX_DISTINCT_VIEWS_PER_SESSION)
+  like_received:             5,   // solo i primi N like/giorno per ricevente contano (rate limit già deciso)
+  superlike_received:        8,
+  rosa_standalone:          10,
+  rosa_like:                10,   // + bonus separato al DESTINATARIO se vince il minigioco (vedi GUESS_GAME_BONUS_POINTS)
+  rosa_super:               12,
+  mission_completed:        15,   // missione sponsorizzata da brand
+  connector_discovery_bonus: 18,  // Top Connector: bonus per aver "scoperto" un profilo che poi esplode
 };
+
+// Punti a chi COMPIE l'azione (non solo a chi la riceve) — valori
+// fissi decisi insieme, non più calcolati come "percentuale" del
+// valore del destinatario (evita decimali/arrotondamenti ovunque).
+const SENDER_POINTS = {
+  profile_view:        1,
+  like_received:       2,
+  superlike_received:  3,
+  rosa_standalone:     4,
+  rosa_like:           4,
+  rosa_super:          5,
+};
+
+// Bonus al DESTINATARIO se vince il minigioco Rosa+Like (è lui/lei
+// che gioca, quindi il bonus va a lui/lei, non a chi ha mandato la Rosa).
+const GUESS_GAME_BONUS_POINTS = 8;
+
+// Tetto anti-spam sulle visite profilo: oltre le prime N persone
+// DIVERSE viste in una sessione, le visite continuano a funzionare
+// ma non generano più punti — altrimenti basterebbe scorrere il
+// radar all'infinito per accumulare punti senza sforzo reale.
+const MAX_DISTINCT_VIEWS_PER_SESSION = 20;
+
 
 const MULTIPLIERS = {
   premium:        1.2,   // profilo Premium a pagamento
@@ -67,9 +92,6 @@ async function computePoints({ receiverId, source, senderId, arenaSessionId }, {
     `, [senderId, arenaSessionId]);
 
     if (senderStatus && senderStatus.is_top_connector) {
-      // La Rosa (qualunque tier) è sempre esente dal tetto: costa
-      // denaro reale ogni volta, quindi è già naturalmente limitata
-      // — nessun bisogno di un tetto artificiale in più.
       const isRosaSource = source.startsWith('rosa_');
 
       const alreadyBoostedThisReceiver = isRosaSource
@@ -79,9 +101,6 @@ async function computePoints({ receiverId, source, senderId, arenaSessionId }, {
       if (isRosaSource || !alreadyBoostedThisReceiver) {
         localPoints = Math.round(localPoints * MULTIPLIERS.top_connector_vote);
       }
-      // Se ha già "boostato" questa persona con lo stesso tipo di
-      // interazione in questa sessione, il valore resta quello base
-      // — niente errore, semplicemente niente bonus la seconda volta.
     }
   }
 
@@ -93,8 +112,6 @@ async function computePoints({ receiverId, source, senderId, arenaSessionId }, {
     SELECT 1 FROM founder_bracelets WHERE user_id = $1
   `, [receiverId]);
   if (isFounder) {
-    // Il bonus founder si applica SOLO all'accumulo globale, mai al
-    // locale — coerente con "si riparte tutti alla pari ogni sera".
     globalOnlyBonus = Math.round(base * (MULTIPLIERS.founder_global - 1));
   }
 
@@ -131,15 +148,13 @@ async function awardPoints({ receiverId, arenaSessionId, source, senderId }, { d
 }
 
 /**
- * Assegna al MITTENTE una quota (0.3x) dei punti che ha generato
- * per il destinatario con la sua interazione. Va chiamata SOLO se
- * l'invio è ancora dentro i limiti previsti (per il Like: il tetto
- * dei primi 10 per Arena, verificato PRIMA di chiamare questa
- * funzione — vedi isUnderSenderLikeLimit in interactions-logic).
+ * Assegna al MITTENTE una quota fissa dei punti per l'interazione
+ * che ha compiuto. Va chiamata SOLO se l'invio è ancora dentro i
+ * limiti previsti (per il Like: il tetto dei primi 10 per Arena).
  */
-async function awardSenderPoints({ senderId, arenaSessionId, receiverLocalPoints, source }, { db, io }) {
-  const senderPoints = Math.round(receiverLocalPoints * MULTIPLIERS.sender_share);
-  if (senderPoints <= 0) return { senderPoints: 0 };
+async function awardSenderPoints({ senderId, arenaSessionId, source }, { db, io }) {
+  const senderPoints = SENDER_POINTS[source];
+  if (!senderPoints || senderPoints <= 0) return { senderPoints: 0 };
 
   await db.query(`
     INSERT INTO points_ledger (user_id, arena_session_id, points, source, counts_toward_local)
@@ -168,10 +183,7 @@ async function hasAlreadyBoosted({ senderId, receiverId, source, arenaSessionId 
     SELECT COUNT(*) FROM interactions
     WHERE sender_id = $1 AND receiver_id = $2 AND type = $3 AND arena_session_id = $4
   `, [senderId, receiverId, interactionType, arenaSessionId]);
-  // Nota: questa funzione va chiamata PRIMA di inserire la nuova
-  // riga in "interactions" — se la riga corrente fosse già stata
-  // scritta, il conteggio includerebbe anche lei per errore.
   return priorCount > 0;
 }
 
-module.exports = { BASE_POINTS, MULTIPLIERS, LIKE_SENDER_FREE_LIMIT, computePoints, awardPoints, awardSenderPoints };
+module.exports = { BASE_POINTS, SENDER_POINTS, MULTIPLIERS, LIKE_SENDER_FREE_LIMIT, GUESS_GAME_BONUS_POINTS, MAX_DISTINCT_VIEWS_PER_SESSION, computePoints, awardPoints, awardSenderPoints };
