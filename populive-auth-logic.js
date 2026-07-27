@@ -1,6 +1,6 @@
 /**
  * ============================================================
- * POPULIVE — AUTENTICAZIONE VERA (telefono + SMS)
+ * POPULIVE — AUTENTICAZIONE VERA (telefono + SMS, via Twilio Verify)
  * ============================================================
  * Finora il sistema si fidava semplicemente di un header
  * "x-user-id" mandato dal frontend — chiunque avrebbe potuto
@@ -10,14 +10,22 @@
  * (tramite un codice ricevuto via SMS), e ogni richiesta successiva
  * porta un token firmato che il server verifica di aver emesso lui
  * stesso — non più un dato che il frontend può inventarsi.
+ *
+ * IMPORTANTE — cambio rispetto alla prima versione: usiamo
+ * "Twilio Verify" invece della Messaging API grezza. Due motivi:
+ *   1) Gli account Twilio in prova possono mandare SOLO messaggi
+ *      con un testo tra quelli predefiniti — Verify è pensato
+ *      apposta per i codici di verifica e include già il modello
+ *      giusto.
+ *   2) Bonus: Twilio ora gestisce lui stesso generazione, scadenza
+ *      e tentativi del codice — non ci serve più una tabella
+ *      nostra (otp_codes) per tenerne traccia.
  * ============================================================
  */
 
 const jwt = require('jsonwebtoken');
 const twilio = require('twilio');
 
-const OTP_EXPIRY_MINUTES = 10;
-const MAX_OTP_ATTEMPTS = 5;
 const JWT_EXPIRY = '30d';
 
 function getTwilioClient() {
@@ -28,55 +36,37 @@ async function requestOtp({ phoneNumber }, { db }) {
   const normalizedPhone = normalizePhoneNumber(phoneNumber);
   if (!normalizedPhone) return { success: false, reason: 'invalid_phone_number' };
 
-  const code = generateOtpCode();
-  const expiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
-
-  await db.query(`
-    INSERT INTO otp_codes (phone_number, code, expires_at)
-    VALUES ($1, $2, $3)
-  `, [normalizedPhone, code, expiresAt]);
-
   try {
     const client = getTwilioClient();
-    await client.messages.create({
-      body: `Il tuo codice PopuLive è: ${code}`,
-      from: process.env.TWILIO_PHONE_NUMBER,
-      to: normalizedPhone,
-    });
+    await client.verify.v2
+      .services(process.env.TWILIO_VERIFY_SERVICE_SID)
+      .verifications.create({ to: normalizedPhone, channel: 'sms' });
   } catch (err) {
     console.error('[auth] invio SMS fallito:', err);
     return { success: false, reason: 'sms_send_failed' };
   }
 
-  return { success: true, expiresInMinutes: OTP_EXPIRY_MINUTES };
+  return { success: true };
 }
 
 async function verifyOtp({ phoneNumber, code }, { db }) {
   const normalizedPhone = normalizePhoneNumber(phoneNumber);
   if (!normalizedPhone) return { success: false, reason: 'invalid_phone_number' };
 
-  const otpRow = await db.query(`
-    SELECT * FROM otp_codes
-    WHERE phone_number = $1 AND verified = false
-    ORDER BY created_at DESC
-    LIMIT 1
-  `, [normalizedPhone]);
-
-  if (!otpRow) return { success: false, reason: 'no_pending_code' };
-
-  if (new Date(otpRow.expires_at) < new Date()) {
-    return { success: false, reason: 'code_expired' };
-  }
-  if (otpRow.attempts >= MAX_OTP_ATTEMPTS) {
-    return { success: false, reason: 'too_many_attempts' };
+  let check;
+  try {
+    const client = getTwilioClient();
+    check = await client.verify.v2
+      .services(process.env.TWILIO_VERIFY_SERVICE_SID)
+      .verificationChecks.create({ to: normalizedPhone, code });
+  } catch (err) {
+    console.error('[auth] verifica codice fallita:', err);
+    return { success: false, reason: 'verification_failed' };
   }
 
-  if (otpRow.code !== code) {
-    await db.query(`UPDATE otp_codes SET attempts = attempts + 1 WHERE id = $1`, [otpRow.id]);
+  if (check.status !== 'approved') {
     return { success: false, reason: 'wrong_code' };
   }
-
-  await db.query(`UPDATE otp_codes SET verified = true WHERE id = $1`, [otpRow.id]);
 
   let user = await db.query(`SELECT id, onboarding_completed FROM users WHERE phone_number = $1`, [normalizedPhone]);
 
@@ -108,10 +98,6 @@ function verifyToken(token) {
   } catch (err) {
     return { valid: false };
   }
-}
-
-function generateOtpCode() {
-  return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
 function normalizePhoneNumber(raw) {
