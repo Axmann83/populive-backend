@@ -30,33 +30,20 @@ const {
 const { generateVenueReport } = require('./populive-venue-insights');
 const { joinSquad } = require('./populive-connector-engine');
 const { getLocalRanking, getGlobalRanking, getUserRankingSummary } = require('./populive-ranking-queries');
+const { requestOtp, verifyOtp, verifyToken } = require('./populive-auth-logic');
 
 const app = express();
-app.use(cors()); // permette al frontend (su un altro indirizzo) di chiamare questo backend
+app.use(cors());
 app.use(express.json());
 
 const httpServer = http.createServer(app);
 
-// Connessioni ai due database, condivise da tutte le richieste
-// (si aprono una volta all'avvio, non a ogni singola chiamata).
 const db = createDb(process.env.DATABASE_URL);
 const redis = new Redis(process.env.REDIS_URL);
 const io = setupWebSocket(httpServer, { redis, db });
 
-// Piccola utility ripetuta in ogni endpoint: le tre dipendenze che
-// tutte le funzioni di logica si aspettano di ricevere.
 const deps = { db, redis, io };
 
-/**
- * "Avvolgitore" per ogni endpoint — invece di scrivere un try/catch
- * dentro OGNI singola funzione (facile da dimenticare, e infatti
- * l'abbiamo dimenticato più volte), avvolgiamo qui ogni handler UNA
- * volta sola: se la funzione dentro lancia un errore per qualunque
- * motivo, viene automaticamente intercettato e passato al gestore
- * di errori globale in fondo al file — mai più un crash che il
- * frontend vede come "errore di rete" senza sapere cosa sia successo
- * davvero.
- */
 function ah(fn) {
   return (req, res, next) => {
     Promise.resolve(fn(req, res, next)).catch(next);
@@ -64,14 +51,13 @@ function ah(fn) {
 }
 
 
-// ------------------------------------------------------------
-// MIDDLEWARE — verifica che l'utente esista e abbia completato
-// l'onboarding, PRIMA di eseguire qualunque azione "vera"
-// dell'app. Non tocca handleCheckin/sendRosa/ecc: si mette davanti.
-// ------------------------------------------------------------
 async function requireOnboarded(req, res, next) {
-  const userId = req.headers['x-user-id']; // in produzione: da un token di sessione vero, non un header semplice
-  if (!userId) return res.status(401).json({ success: false, reason: 'missing_user' });
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  if (!token) return res.status(401).json({ success: false, reason: 'missing_token' });
+
+  const { valid, userId } = verifyToken(token);
+  if (!valid) return res.status(401).json({ success: false, reason: 'invalid_or_expired_token' });
 
   const check = await requireCompletedOnboarding(userId, { db });
   if (!check.allowed) return res.status(403).json({ success: false, reason: check.reason });
@@ -80,31 +66,55 @@ async function requireOnboarded(req, res, next) {
   next();
 }
 
+async function requireAuthOnly(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  if (!token) return res.status(401).json({ success: false, reason: 'missing_token' });
 
-// ------------------------------------------------------------
-// PROFILO / ONBOARDING (nessun requireOnboarded qui, ovviamente:
-// è proprio il percorso PER diventare onboarded)
-// ------------------------------------------------------------
-app.post('/api/profile', ah(async (req, res) => {
+  const { valid, userId } = verifyToken(token);
+  if (!valid) return res.status(401).json({ success: false, reason: 'invalid_or_expired_token' });
+
+  req.userId = userId;
+  next();
+}
+
+
+app.post('/api/auth/request-otp', ah(async (req, res) => {
+  const { phoneNumber } = req.body;
+  const result = await requestOtp({ phoneNumber }, { db });
+  res.json(result);
+}));
+
+app.post('/api/auth/verify-otp', ah(async (req, res) => {
+  const { phoneNumber, code } = req.body;
+  const result = await verifyOtp({ phoneNumber, code }, { db });
+  res.json(result);
+}));
+
+app.get('/api/auth/me', requireAuthOnly, ah(async (req, res) => {
+  const user = await db.query(`SELECT id, onboarding_completed FROM users WHERE id = $1`, [req.userId]);
+  if (!user) return res.json({ success: false, reason: 'user_not_found' });
+  res.json({ success: true, userId: user.id, onboardingCompleted: user.onboarding_completed });
+}));
+
+
+app.post('/api/profile', requireAuthOnly, ah(async (req, res) => {
   const { displayName, bio, hashtagNames } = req.body;
-  const result = await createProfile({ displayName, bio, hashtagNames }, { db });
+  const result = await createProfile({ userId: req.userId, displayName, bio, hashtagNames }, { db });
   res.json(result);
 }));
 
-app.post('/api/profile/:userId/photo', ah(async (req, res) => {
-  const result = await setProfilePhoto({ userId: req.params.userId, photoUrl: req.body.photoUrl }, { db });
+app.post('/api/profile/:userId/photo', requireAuthOnly, ah(async (req, res) => {
+  const result = await setProfilePhoto({ userId: req.userId, photoUrl: req.body.photoUrl }, { db });
   res.json(result);
 }));
 
-app.post('/api/profile/:userId/onboarding', ah(async (req, res) => {
-  const result = await completeOnboarding({ userId: req.params.userId, consentChoices: req.body }, { db });
+app.post('/api/profile/:userId/onboarding', requireAuthOnly, ah(async (req, res) => {
+  const result = await completeOnboarding({ userId: req.userId, consentChoices: req.body }, { db });
   res.json(result);
 }));
 
 
-// ------------------------------------------------------------
-// CHECK-IN
-// ------------------------------------------------------------
 app.post('/api/checkin', requireOnboarded, ah(async (req, res) => {
   const { venueId } = req.body;
   const result = await handleCheckin({ userId: req.userId, venueId }, deps);
@@ -112,11 +122,8 @@ app.post('/api/checkin', requireOnboarded, ah(async (req, res) => {
 }));
 
 
-// ------------------------------------------------------------
-// INTERAZIONI (Like / Superlike / visite profilo)
-// ------------------------------------------------------------
 app.post('/api/interactions/send', requireOnboarded, ah(async (req, res) => {
-  const { receiverId, arenaSessionId, type } = req.body; // type: 'like' | 'superlike'
+  const { receiverId, arenaSessionId, type } = req.body;
   const result = await sendInteraction({ senderId: req.userId, receiverId, arenaSessionId, type }, deps);
   res.json(result);
 }));
@@ -128,11 +135,8 @@ app.post('/api/profile-views', requireOnboarded, ah(async (req, res) => {
 }));
 
 
-// ------------------------------------------------------------
-// ROSE
-// ------------------------------------------------------------
 app.get('/api/users/:userId/roses', requireOnboarded, ah(async (req, res) => {
-  const roses = await getReceivedRoses({ userId: req.params.userId }, deps);
+  const roses = await getReceivedRoses({ userId: req.userId }, deps);
   res.json({ success: true, roses });
 }));
 
@@ -145,7 +149,7 @@ app.post('/api/roses/send', requireOnboarded, ah(async (req, res) => {
 }));
 
 app.post('/api/roses/:rosaId/respond', requireOnboarded, ah(async (req, res) => {
-  const { action } = req.body; // 'accept' | 'reject' | 'ignore'
+  const { action } = req.body;
   const result = await respondToRosa({
     rosaId: req.params.rosaId, receiverId: req.userId, action,
   }, deps);
@@ -161,9 +165,6 @@ app.post('/api/roses/:rosaId/guess', requireOnboarded, ah(async (req, res) => {
 }));
 
 
-// ------------------------------------------------------------
-// REPORT PER I LOCALI (v. populive-venue-insights.js)
-// ------------------------------------------------------------
 app.get('/api/venues/:venueId/report', ah(async (req, res) => {
   const { fromDate, toDate } = req.query;
   const result = await generateVenueReport({ venueId: req.params.venueId, fromDate, toDate }, { db });
@@ -171,9 +172,6 @@ app.get('/api/venues/:venueId/report', ah(async (req, res) => {
 }));
 
 
-// ------------------------------------------------------------
-// TAVOLO — "Aggancia il tuo tavolo"
-// ------------------------------------------------------------
 app.post('/api/table/join', requireOnboarded, ah(async (req, res) => {
   const { tableQrCode, arenaSessionId, wantsToBeConnector } = req.body;
   const result = await joinSquad({
@@ -187,9 +185,6 @@ app.post('/api/table/join', requireOnboarded, ah(async (req, res) => {
 }));
 
 
-// ------------------------------------------------------------
-// CLASSIFICHE (locale e globale)
-// ------------------------------------------------------------
 app.get('/api/arenas/:arenaSessionId/ranking', ah(async (req, res) => {
   const ranking = await getLocalRanking({ arenaSessionId: req.params.arenaSessionId }, { db });
   res.json({ success: true, ranking });
@@ -203,15 +198,14 @@ app.get('/api/ranking/global', ah(async (req, res) => {
 
 app.get('/api/users/:userId/ranking-summary', ah(async (req, res) => {
   const { arenaSessionId } = req.query;
-  const viewerId = req.headers['x-user-id'];
-  const summary = await getUserRankingSummary({ userId: req.params.userId, arenaSessionId, viewerId }, { db });
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  const { valid, userId: viewerId } = token ? verifyToken(token) : { valid: false };
+  const summary = await getUserRankingSummary({ userId: req.params.userId, arenaSessionId, viewerId: valid ? viewerId : null }, { db });
   res.json({ success: true, summary });
 }));
 
 
-// ------------------------------------------------------------
-// DRINK DISPONIBILI IN UN LOCALE
-// ------------------------------------------------------------
 app.get('/api/venues/:venueId/drinks', ah(async (req, res) => {
   const drinks = await db.queryAll(`
     SELECT dp.id, dp.name, dp.base_price_cents, dp.sponsor_discount_cents, bs.name AS sponsor_name
@@ -225,9 +219,6 @@ app.get('/api/venues/:venueId/drinks', ah(async (req, res) => {
 }));
 
 
-// ------------------------------------------------------------
-// RISCATTO REALE AL BANCONE
-// ------------------------------------------------------------
 app.post('/api/roses/:rosaId/redeem', ah(async (req, res) => {
   const { redeemCode } = req.body;
 
@@ -246,9 +237,6 @@ app.post('/api/roses/:rosaId/redeem', ah(async (req, res) => {
   res.json({ success: true });
 }));
 
-// ------------------------------------------------------------
-// CANDIDATI PER IL MINIGIOCO ROSA+LIKE
-// ------------------------------------------------------------
 app.get('/api/arenas/:arenaSessionId/guess-candidates', ah(async (req, res) => {
   const candidates = await db.queryAll(`
     SELECT DISTINCT u.id AS user_id, u.display_name, u.avatar_emoji, u.photo_url
@@ -260,9 +248,6 @@ app.get('/api/arenas/:arenaSessionId/guess-candidates', ah(async (req, res) => {
 }));
 
 
-// ------------------------------------------------------------
-// RISPOSTA A UN SUPERLIKE SEMPLICE
-// ------------------------------------------------------------
 app.post('/api/interactions/:interactionId/respond', requireOnboarded, ah(async (req, res) => {
   const { action } = req.body;
   const result = await respondToSuperlike({
@@ -272,9 +257,6 @@ app.post('/api/interactions/:interactionId/respond', requireOnboarded, ah(async 
 }));
 
 
-// ------------------------------------------------------------
-// CHAT 1-A-1
-// ------------------------------------------------------------
 app.post('/api/chat/:conversationId/messages', requireOnboarded, ah(async (req, res) => {
   const { body } = req.body;
   const result = await sendMessage({
@@ -299,15 +281,12 @@ app.post('/api/chat/:conversationId/keep-preference', requireOnboarded, ah(async
 }));
 
 
-// ------------------------------------------------------------
-// IMPOSTAZIONI
-// ------------------------------------------------------------
 app.get('/api/profile/:userId/settings', requireOnboarded, ah(async (req, res) => {
   const user = await db.query(`
     SELECT show_ranking_on_profile, sponsored_missions_enabled,
            appears_in_historical_search, receive_roses_enabled, contact_filter
     FROM users WHERE id = $1
-  `, [req.params.userId]);
+  `, [req.userId]);
   if (!user) return res.json({ success: false, reason: 'user_not_found' });
 
   res.json({
@@ -339,16 +318,13 @@ app.post('/api/profile/:userId/settings', requireOnboarded, ah(async (req, res) 
   `, [
     showRankingOnProfile, sponsoredMissionsEnabled,
     appearsInHistoricalSearch, receiveRosesEnabled, contactFilter,
-    req.params.userId,
+    req.userId,
   ]);
 
   res.json({ success: true });
 }));
 
 
-// ------------------------------------------------------------
-// GESTORE DI ERRORI GLOBALE
-// ------------------------------------------------------------
 app.use((err, req, res, next) => {
   console.error('[errore non gestito]', err);
   res.status(500).json({ success: false, reason: 'internal_error' });
