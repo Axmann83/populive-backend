@@ -47,6 +47,22 @@ const io = setupWebSocket(httpServer, { redis, db });
 // tutte le funzioni di logica si aspettano di ricevere.
 const deps = { db, redis, io };
 
+/**
+ * "Avvolgitore" per ogni endpoint — invece di scrivere un try/catch
+ * dentro OGNI singola funzione (facile da dimenticare, e infatti
+ * l'abbiamo dimenticato più volte), avvolgiamo qui ogni handler UNA
+ * volta sola: se la funzione dentro lancia un errore per qualunque
+ * motivo, viene automaticamente intercettato e passato al gestore
+ * di errori globale in fondo al file — mai più un crash che il
+ * frontend vede come "errore di rete" senza sapere cosa sia successo
+ * davvero.
+ */
+function ah(fn) {
+  return (req, res, next) => {
+    Promise.resolve(fn(req, res, next)).catch(next);
+  };
+}
+
 
 // ------------------------------------------------------------
 // MIDDLEWARE — verifica che l'utente esista e abbia completato
@@ -69,147 +85,134 @@ async function requireOnboarded(req, res, next) {
 // PROFILO / ONBOARDING (nessun requireOnboarded qui, ovviamente:
 // è proprio il percorso PER diventare onboarded)
 // ------------------------------------------------------------
-app.post('/api/profile', async (req, res) => {
+app.post('/api/profile', ah(async (req, res) => {
   const { displayName, bio, hashtagNames } = req.body;
   const result = await createProfile({ displayName, bio, hashtagNames }, { db });
   res.json(result);
-});
+}));
 
-app.post('/api/profile/:userId/photo', async (req, res) => {
+app.post('/api/profile/:userId/photo', ah(async (req, res) => {
   const result = await setProfilePhoto({ userId: req.params.userId, photoUrl: req.body.photoUrl }, { db });
   res.json(result);
-});
+}));
 
-app.post('/api/profile/:userId/onboarding', async (req, res) => {
+app.post('/api/profile/:userId/onboarding', ah(async (req, res) => {
   const result = await completeOnboarding({ userId: req.params.userId, consentChoices: req.body }, { db });
   res.json(result);
-});
+}));
 
 
 // ------------------------------------------------------------
 // CHECK-IN
 // ------------------------------------------------------------
-app.post('/api/checkin', requireOnboarded, async (req, res) => {
+app.post('/api/checkin', requireOnboarded, ah(async (req, res) => {
   const { venueId } = req.body;
   const result = await handleCheckin({ userId: req.userId, venueId }, deps);
   res.json(result);
-});
+}));
 
 
 // ------------------------------------------------------------
 // INTERAZIONI (Like / Superlike / visite profilo)
 // ------------------------------------------------------------
-app.post('/api/interactions/send', requireOnboarded, async (req, res) => {
+app.post('/api/interactions/send', requireOnboarded, ah(async (req, res) => {
   const { receiverId, arenaSessionId, type } = req.body; // type: 'like' | 'superlike'
   const result = await sendInteraction({ senderId: req.userId, receiverId, arenaSessionId, type }, deps);
   res.json(result);
-});
+}));
 
-app.post('/api/profile-views', requireOnboarded, async (req, res) => {
+app.post('/api/profile-views', requireOnboarded, ah(async (req, res) => {
   const { viewedUserId, arenaSessionId } = req.body;
   const result = await trackProfileView({ viewerId: req.userId, viewedUserId, arenaSessionId }, deps);
   res.json(result);
-});
+}));
 
 
 // ------------------------------------------------------------
 // ROSE
 // ------------------------------------------------------------
-app.get('/api/users/:userId/roses', requireOnboarded, async (req, res) => {
+app.get('/api/users/:userId/roses', requireOnboarded, ah(async (req, res) => {
   const roses = await getReceivedRoses({ userId: req.params.userId }, deps);
   res.json({ success: true, roses });
-});
+}));
 
-app.post('/api/roses/send', requireOnboarded, async (req, res) => {
+app.post('/api/roses/send', requireOnboarded, ah(async (req, res) => {
   const { receiverId, arenaSessionId, drinkProductId, tier } = req.body;
   const result = await sendRosa({
     senderId: req.userId, receiverId, arenaSessionId, drinkProductId, tier,
   }, deps);
   res.json(result);
-});
+}));
 
-app.post('/api/roses/:rosaId/respond', requireOnboarded, async (req, res) => {
+app.post('/api/roses/:rosaId/respond', requireOnboarded, ah(async (req, res) => {
   const { action } = req.body; // 'accept' | 'reject' | 'ignore'
   const result = await respondToRosa({
     rosaId: req.params.rosaId, receiverId: req.userId, action,
   }, deps);
   res.json(result);
-});
+}));
 
-app.post('/api/roses/:rosaId/guess', requireOnboarded, async (req, res) => {
+app.post('/api/roses/:rosaId/guess', requireOnboarded, ah(async (req, res) => {
   const { guessedUserId } = req.body;
   const result = await attemptGuess({
     rosaId: req.params.rosaId, receiverId: req.userId, guessedUserId,
   }, deps);
   res.json(result);
-});
+}));
 
 
 // ------------------------------------------------------------
 // REPORT PER I LOCALI (v. populive-venue-insights.js)
 // ------------------------------------------------------------
-app.get('/api/venues/:venueId/report', async (req, res) => {
-  // NOTA: in produzione questo endpoint va protetto — solo il
-  // team o il proprietario autenticato del locale specifico deve
-  // poterlo chiamare, non chiunque conosca l'indirizzo.
+app.get('/api/venues/:venueId/report', ah(async (req, res) => {
   const { fromDate, toDate } = req.query;
   const result = await generateVenueReport({ venueId: req.params.venueId, fromDate, toDate }, { db });
   res.json(result);
-});
+}));
 
 
 // ------------------------------------------------------------
-// TAVOLO — "Aggancia il tuo tavolo" (bottone dentro l'app, non un
-// secondo link/QR esterno — fotocamera nativa dell'app che legge
-// il QR fisico sul tavolo e collega la sessione corrente)
+// TAVOLO — "Aggancia il tuo tavolo"
 // ------------------------------------------------------------
-app.post('/api/table/join', requireOnboarded, async (req, res) => {
+app.post('/api/table/join', requireOnboarded, ah(async (req, res) => {
   const { tableQrCode, arenaSessionId, wantsToBeConnector } = req.body;
-  // wantsToBeConnector: risposta alla domanda "vuoi essere il Top
-  // Connector di questo tavolo?", mostrata dal frontend SOLO se
-  // questo è il primo scan di questo QR (tavolo non ancora agganciato
-  // da nessuno) — il frontend lo sa perché può controllare prima con
-  // una GET se il tavolo esiste già, o semplicemente mostrare sempre
-  // la domanda e il backend la ignora se il tavolo esiste già.
   const result = await joinSquad({
-    connectorId: undefined,  // lascia decidere a joinSquad in base allo stato del tavolo
+    connectorId: undefined,
     memberId: req.userId,
     arenaSessionId,
     tableQrCode,
     wantsToBeConnector,
   }, deps);
   res.json(result);
-});
+}));
 
 
 // ------------------------------------------------------------
-// CLASSIFICHE (locale e globale) — sola lettura, derivate sempre
-// dallo stesso points_ledger, mai una tabella separata da tenere
-// sincronizzata a mano.
+// CLASSIFICHE (locale e globale)
 // ------------------------------------------------------------
-app.get('/api/arenas/:arenaSessionId/ranking', async (req, res) => {
+app.get('/api/arenas/:arenaSessionId/ranking', ah(async (req, res) => {
   const ranking = await getLocalRanking({ arenaSessionId: req.params.arenaSessionId }, { db });
   res.json({ success: true, ranking });
-});
+}));
 
-app.get('/api/ranking/global', async (req, res) => {
+app.get('/api/ranking/global', ah(async (req, res) => {
   const limit = parseInt(req.query.limit) || 100;
   const ranking = await getGlobalRanking({ limit }, { db });
   res.json({ success: true, ranking });
-});
+}));
 
-app.get('/api/users/:userId/ranking-summary', async (req, res) => {
+app.get('/api/users/:userId/ranking-summary', ah(async (req, res) => {
   const { arenaSessionId } = req.query;
-  const viewerId = req.headers['x-user-id']; // chi sta guardando, per rispettare show_ranking_on_profile
+  const viewerId = req.headers['x-user-id'];
   const summary = await getUserRankingSummary({ userId: req.params.userId, arenaSessionId, viewerId }, { db });
   res.json({ success: true, summary });
-});
+}));
 
 
 // ------------------------------------------------------------
-// DRINK DISPONIBILI IN UN LOCALE (per la schermata di invio Rosa)
+// DRINK DISPONIBILI IN UN LOCALE
 // ------------------------------------------------------------
-app.get('/api/venues/:venueId/drinks', async (req, res) => {
+app.get('/api/venues/:venueId/drinks', ah(async (req, res) => {
   const drinks = await db.queryAll(`
     SELECT dp.id, dp.name, dp.base_price_cents, dp.sponsor_discount_cents, bs.name AS sponsor_name
     FROM venue_drink_catalog vdc
@@ -219,19 +222,13 @@ app.get('/api/venues/:venueId/drinks', async (req, res) => {
     ORDER BY dp.base_price_cents ASC
   `, [req.params.venueId]);
   res.json({ success: true, drinks });
-});
+}));
 
 
 // ------------------------------------------------------------
-// RISCATTO REALE AL BANCONE — chiamato dal telefono del CLIENTE
-// nel momento in cui il bartender stesso tocca il sigillo attivo
-// sul suo schermo. Non serve nessun dispositivo o account separato
-// per lo staff: il tocco del bartender sul telefono del cliente è
-// insieme la verifica antifrode (il flash dimostra che è dal vivo)
-// e la conferma di riscatto — un solo gesto, zero attrito operativo
-// per il locale.
+// RISCATTO REALE AL BANCONE
 // ------------------------------------------------------------
-app.post('/api/roses/:rosaId/redeem', async (req, res) => {
+app.post('/api/roses/:rosaId/redeem', ah(async (req, res) => {
   const { redeemCode } = req.body;
 
   const rosa = await db.query(`
@@ -247,13 +244,12 @@ app.post('/api/roses/:rosaId/redeem', async (req, res) => {
 
   await db.query(`UPDATE roses SET status = 'redeemed' WHERE id = $1`, [req.params.rosaId]);
   res.json({ success: true });
-});
+}));
+
 // ------------------------------------------------------------
-// CANDIDATI PER IL MINIGIOCO ROSA+LIKE — profili di base di chi
-// ha fatto check-in in questa Arena (nome, foto), usati per la
-// schermata "indovina chi ti ha inviato la Rosa".
+// CANDIDATI PER IL MINIGIOCO ROSA+LIKE
 // ------------------------------------------------------------
-app.get('/api/arenas/:arenaSessionId/guess-candidates', async (req, res) => {
+app.get('/api/arenas/:arenaSessionId/guess-candidates', ah(async (req, res) => {
   const candidates = await db.queryAll(`
     SELECT DISTINCT u.id AS user_id, u.display_name, u.avatar_emoji, u.photo_url
     FROM checkins c
@@ -261,55 +257,52 @@ app.get('/api/arenas/:arenaSessionId/guess-candidates', async (req, res) => {
     WHERE c.arena_session_id = $1
   `, [req.params.arenaSessionId]);
   res.json({ success: true, candidates });
-});
+}));
 
 
 // ------------------------------------------------------------
-// RISPOSTA A UN SUPERLIKE SEMPLICE — accetta/rifiuta/lascia in sospeso
+// RISPOSTA A UN SUPERLIKE SEMPLICE
 // ------------------------------------------------------------
-app.post('/api/interactions/:interactionId/respond', requireOnboarded, async (req, res) => {
+app.post('/api/interactions/:interactionId/respond', requireOnboarded, ah(async (req, res) => {
   const { action } = req.body;
   const result = await respondToSuperlike({
     interactionId: req.params.interactionId, receiverId: req.userId, action,
   }, deps);
   res.json(result);
-});
+}));
 
 
 // ------------------------------------------------------------
-// CHAT 1-A-1 — invio e lettura messaggi, sempre solo tra i due
-// partecipanti della conversazione
+// CHAT 1-A-1
 // ------------------------------------------------------------
-app.post('/api/chat/:conversationId/messages', requireOnboarded, async (req, res) => {
+app.post('/api/chat/:conversationId/messages', requireOnboarded, ah(async (req, res) => {
   const { body } = req.body;
   const result = await sendMessage({
     conversationId: req.params.conversationId, senderId: req.userId, body,
   }, deps);
   res.json(result);
-});
+}));
 
-app.get('/api/chat/:conversationId/messages', requireOnboarded, async (req, res) => {
+app.get('/api/chat/:conversationId/messages', requireOnboarded, ah(async (req, res) => {
   const result = await getMessages({
     conversationId: req.params.conversationId, requesterId: req.userId,
   }, deps);
   res.json(result);
-});
+}));
 
-app.post('/api/chat/:conversationId/keep-preference', requireOnboarded, async (req, res) => {
+app.post('/api/chat/:conversationId/keep-preference', requireOnboarded, ah(async (req, res) => {
   const { wantsKeep } = req.body;
   const result = await setChatKeepPreference({
     conversationId: req.params.conversationId, userId: req.userId, wantsKeep,
   }, deps);
   res.json(result);
-});
+}));
 
 
 // ------------------------------------------------------------
-// IMPOSTAZIONI — richiamabili in ogni momento (a differenza del
-// consenso di onboarding, visto una sola volta) per cambiare idea
-// liberamente su privacy e autopresentazione.
+// IMPOSTAZIONI
 // ------------------------------------------------------------
-app.get('/api/profile/:userId/settings', requireOnboarded, async (req, res) => {
+app.get('/api/profile/:userId/settings', requireOnboarded, ah(async (req, res) => {
   const user = await db.query(`
     SELECT show_ranking_on_profile, sponsored_missions_enabled,
            appears_in_historical_search, receive_roses_enabled, contact_filter
@@ -327,9 +320,9 @@ app.get('/api/profile/:userId/settings', requireOnboarded, async (req, res) => {
       contactFilter: user.contact_filter,
     },
   });
-});
+}));
 
-app.post('/api/profile/:userId/settings', requireOnboarded, async (req, res) => {
+app.post('/api/profile/:userId/settings', requireOnboarded, ah(async (req, res) => {
   const {
     showRankingOnProfile, sponsoredMissionsEnabled,
     appearsInHistoricalSearch, receiveRosesEnabled, contactFilter,
@@ -350,15 +343,21 @@ app.post('/api/profile/:userId/settings', requireOnboarded, async (req, res) => 
   ]);
 
   res.json({ success: true });
+}));
+
+
+// ------------------------------------------------------------
+// GESTORE DI ERRORI GLOBALE
+// ------------------------------------------------------------
+app.use((err, req, res, next) => {
+  console.error('[errore non gestito]', err);
+  res.status(500).json({ success: false, reason: 'internal_error' });
 });
 
 
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => {
   console.log(`PopuLive API in ascolto sulla porta ${PORT}`);
-  // Il motore a orari parte insieme al server — gira per sempre in
-  // background, controllando ogni pochi minuti se qualche Arena va
-  // aperta o chiusa. Nessun intervento manuale necessario da qui in poi.
   startScheduler({ db, redis, io });
   console.log('Motore a orari avviato.');
 });
