@@ -95,22 +95,33 @@ async function getUserRankingSummary({ userId, arenaSessionId, viewerId }, { db 
     }
   }
 
-  const localPointsRow = await db.query(`
-    SELECT COALESCE(SUM(points), 0) AS total FROM points_ledger
-    WHERE user_id = $1 AND arena_session_id = $2 AND counts_toward_local = true
-  `, [userId, arenaSessionId]);
-  const localPoints = parseInt(localPointsRow.total) || 0;
+  // Se non c'è ancora una sessione Arena (utente non ha fatto
+  // check-in stasera), non ha senso interrogare la classifica
+  // locale — passare una stringa vuota a una colonna UUID
+  // manderebbe il database in errore. Saltiamo direttamente ai
+  // dati globali, che esistono sempre.
+  const hasValidSession = arenaSessionId && arenaSessionId.length > 0;
 
-  const localRankRow = await db.query(`
-    SELECT COUNT(*) + 1 AS rank
-    FROM (
-      SELECT user_id, SUM(points) AS pts
-      FROM points_ledger
-      WHERE arena_session_id = $1 AND counts_toward_local = true
-      GROUP BY user_id
-      HAVING SUM(points) > $2
-    ) higher_ranked
-  `, [arenaSessionId, localPoints]);
+  let localPoints = 0;
+  let localRankRow = { rank: null };
+  if (hasValidSession) {
+    const localPointsRow = await db.query(`
+      SELECT COALESCE(SUM(points), 0) AS total FROM points_ledger
+      WHERE user_id = $1 AND arena_session_id = $2 AND counts_toward_local = true
+    `, [userId, arenaSessionId]);
+    localPoints = parseInt(localPointsRow.total) || 0;
+
+    localRankRow = await db.query(`
+      SELECT COUNT(*) + 1 AS rank
+      FROM (
+        SELECT user_id, SUM(points) AS pts
+        FROM points_ledger
+        WHERE arena_session_id = $1 AND counts_toward_local = true
+        GROUP BY user_id
+        HAVING SUM(points) > $2
+      ) higher_ranked
+    `, [arenaSessionId, localPoints]);
+  }
 
   const globalPointsRow = await db.query(`
     SELECT COALESCE(SUM(points), 0) AS total FROM points_ledger WHERE user_id = $1
@@ -129,7 +140,7 @@ async function getUserRankingSummary({ userId, arenaSessionId, viewerId }, { db 
 
   return {
     hidden: false,
-    localRank: localPoints > 0 ? parseInt(localRankRow.rank) : null,
+    localRank: hasValidSession && localPoints > 0 ? parseInt(localRankRow.rank) : null,
     localPoints,
     globalRank: globalPoints > 0 ? parseInt(globalRankRow.rank) : null,
     globalPoints,
