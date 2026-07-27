@@ -32,6 +32,10 @@ function getTwilioClient() {
   return twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 }
 
+/**
+ * STEP 1 — L'utente inserisce il numero, Twilio Verify genera e
+ * manda lui stesso il codice via SMS.
+ */
 async function requestOtp({ phoneNumber }, { db }) {
   const normalizedPhone = normalizePhoneNumber(phoneNumber);
   if (!normalizedPhone) return { success: false, reason: 'invalid_phone_number' };
@@ -49,16 +53,45 @@ async function requestOtp({ phoneNumber }, { db }) {
   return { success: true };
 }
 
+/**
+ * STEP 2 — L'utente inserisce il codice ricevuto.
+ *
+ * NOTA TECNICA IMPORTANTE: qui chiamiamo l'indirizzo di Twilio
+ * DIRETTAMENTE (con una richiesta HTTP semplice), invece di usare
+ * il metodo "comodo" della libreria ufficiale Twilio per Node.js
+ * (client.verify.v2.services(...).verificationChecks.create(...)).
+ * Quel metodo ha un bug noto e documentato (mai risolto del tutto,
+ * segnalato più volte su GitHub) che a volte fa credere che la
+ * richiesta sia fallita anche quando Twilio ha verificato il
+ * codice correttamente. Chiamare l'indirizzo direttamente evita
+ * del tutto quel bug.
+ */
 async function verifyOtp({ phoneNumber, code }, { db }) {
   const normalizedPhone = normalizePhoneNumber(phoneNumber);
   if (!normalizedPhone) return { success: false, reason: 'invalid_phone_number' };
 
   let check;
   try {
-    const client = getTwilioClient();
-    check = await client.verify.v2
-      .services(process.env.TWILIO_VERIFY_SERVICE_SID)
-      .verificationChecks.create({ to: normalizedPhone, code });
+    const auth = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
+    const body = new URLSearchParams({ To: normalizedPhone, Code: code });
+
+    const res = await fetch(
+      `https://verify.twilio.com/v2/Services/${process.env.TWILIO_VERIFY_SERVICE_SID}/VerificationCheck`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Basic ${auth}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: body.toString(),
+      }
+    );
+    check = await res.json();
+
+    if (!res.ok) {
+      console.error('[auth] verifica codice fallita (risposta Twilio):', check);
+      return { success: false, reason: 'verification_failed' };
+    }
   } catch (err) {
     console.error('[auth] verifica codice fallita:', err);
     return { success: false, reason: 'verification_failed' };
