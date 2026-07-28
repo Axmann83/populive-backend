@@ -14,9 +14,6 @@
 
 const MAX_HASHTAGS_PER_USER = 5;
 
-// Ora l'utente esiste GIÀ nel database dal momento della verifica
-// OTP (solo con il numero di telefono, tutto il resto vuoto) —
-// questa funzione AGGIORNA quella riga, non ne crea una nuova.
 async function createProfile({ userId, displayName, bio, hashtagNames }, { db }) {
 
   if (!displayName || displayName.trim().length < 2) {
@@ -112,10 +109,60 @@ async function requireCompletedOnboarding(userId, { db }) {
   return { allowed: true };
 }
 
+
+async function getPublicProfile({ userId, arenaSessionId }, { db }) {
+  const profile = await db.query(`
+    SELECT display_name, photo_url, avatar_emoji, bio
+    FROM users WHERE id = $1
+  `, [userId]);
+
+  if (!profile) return { success: false, reason: 'user_not_found' };
+
+  const hashtagRows = await db.queryAll(`
+    SELECT h.name FROM hashtags h
+    JOIN user_hashtags uh ON uh.hashtag_id = h.id
+    WHERE uh.user_id = $1
+  `, [userId]);
+
+  let isTopConnector = false;
+  let isTopSpender = false;
+  if (arenaSessionId) {
+    const connectorRow = await db.query(`
+      SELECT is_top_connector FROM connector_status
+      WHERE user_id = $1 AND arena_session_id = $2
+    `, [userId, arenaSessionId]);
+    isTopConnector = !!connectorRow?.is_top_connector;
+
+    const spenderRow = await db.query(`
+      SELECT is_top_spender FROM spender_status
+      WHERE user_id = $1 AND arena_session_id = $2
+    `, [userId, arenaSessionId]);
+    isTopSpender = !!spenderRow?.is_top_spender;
+  }
+
+  const founderRow = await db.query(`SELECT 1 FROM founder_bracelets WHERE user_id = $1`, [userId]);
+
+  return {
+    success: true,
+    profile: {
+      userId,
+      displayName: profile.display_name,
+      photoUrl: profile.photo_url,
+      avatarEmoji: profile.avatar_emoji || '🙂',
+      bio: profile.bio,
+      hashtags: hashtagRows.map((h) => h.name),
+      isTopConnector,
+      isTopSpender,
+      isFounder: !!founderRow,
+    },
+  };
+}
+
 module.exports = {
   createProfile,
   setProfilePhoto,
   attachHashtags,
   completeOnboarding,
   requireCompletedOnboarding,
+  getPublicProfile,
 };
