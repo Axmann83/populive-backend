@@ -54,6 +54,22 @@ function setupWebSocket(httpServer, { redis, db }) {
         userId,
       });
 
+      // IMPORTANTE — il pezzo che mancava: chi ENTRA ora deve anche
+      // sapere chi c'era GIÀ prima di lui. socket.to(room) avvisa
+      // solo chi era già dentro, mai il nuovo arrivato — senza
+      // questo, il secondo che entra vedrebbe comunque "0 persone
+      // connesse" finché non arriva un terzo, invece di vedere subito
+      // il primo. Mandiamo un istantanea di chi è già presente,
+      // SOLO a questo socket appena entrato.
+      const existingSocketIds = io.sockets.adapter.rooms.get(room) || new Set();
+      const existingUserIds = [];
+      for (const socketId of existingSocketIds) {
+        if (socketId === socket.id) continue; // non includere se stesso
+        const otherSocket = io.sockets.sockets.get(socketId);
+        if (otherSocket?.data?.userId) existingUserIds.push(otherSocket.data.userId);
+      }
+      socket.emit('radar_snapshot', { userIds: existingUserIds });
+
       // Confermiamo al telefono stesso che è entrato correttamente
       socket.emit('joined_arena_ack', { arenaSessionId });
     });
@@ -76,22 +92,12 @@ function setupWebSocket(httpServer, { redis, db }) {
 
       const room = `arena_${arenaSessionId}`;
 
-      // Registriamo una stima di "orario di uscita" — utile SOLO in
-      // forma aggregata per i report ai locali (v. populive-venue-insights.js),
-      // mai mostrata come dato individuale. È una stima "best effort":
-      // se l'app si chiude bruscamente (batteria scarica, crash) il
-      // disconnect può arrivare con qualche minuto di ritardo, non è
-      // un dato al secondo — sufficiente per medie, non per singoli casi.
       await db.query(`
         UPDATE checkins
         SET checked_out_at = now()
         WHERE user_id = $1 AND arena_session_id = $2 AND checked_out_at IS NULL
       `, [userId, arenaSessionId]);
 
-      // Avvisiamo gli altri che questa persona non è più "vivamente"
-      // collegata — utile per un radar accurato (es. per non mostrare
-      // come "presente ora" chi ha già chiuso l'app), anche se il suo
-      // check-in storico in Postgres resta comunque per sempre.
       socket.to(room).emit('presence_update', {
         type: 'left',
         userId,
