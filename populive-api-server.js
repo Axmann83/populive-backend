@@ -2,13 +2,6 @@
  * ============================================================
  * POPULIVE — SERVER API
  * ============================================================
- * Questo è il "collante": prende tutta la logica che abbiamo già
- * scritto (funzioni pure, senza sapere nulla del web) e la espone
- * come indirizzi HTTP veri che il frontend può chiamare con una
- * richiesta fetch(). Ogni endpoint fa tre cose, sempre nello stesso
- * ordine: legge cosa manda il frontend → chiama la funzione di
- * logica già scritta → risponde con il risultato.
- * ============================================================
  */
 
 const express = require('express');
@@ -25,7 +18,7 @@ const {
 const { sendMessage, getMessages, setChatKeepPreference } = require('./populive-chat-logic');
 const { startScheduler } = require('./populive-scheduler');
 const {
-  createProfile, setProfilePhoto, completeOnboarding, requireCompletedOnboarding,
+  createProfile, setProfilePhoto, completeOnboarding, requireCompletedOnboarding, getPublicProfile,
 } = require('./populive-profile-onboarding');
 const { generateVenueReport } = require('./populive-venue-insights');
 const { joinSquad } = require('./populive-connector-engine');
@@ -118,6 +111,13 @@ app.post('/api/profile/:userId/onboarding', requireAuthOnly, ah(async (req, res)
 app.post('/api/checkin', requireOnboarded, ah(async (req, res) => {
   const { venueId } = req.body;
   const result = await handleCheckin({ userId: req.userId, venueId }, deps);
+  res.json(result);
+}));
+
+
+app.get('/api/users/:userId/public-profile', requireOnboarded, ah(async (req, res) => {
+  const { arenaSessionId } = req.query;
+  const result = await getPublicProfile({ userId: req.params.userId, arenaSessionId }, { db });
   res.json(result);
 }));
 
