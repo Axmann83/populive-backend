@@ -38,6 +38,7 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
     return {
       success: true,
       alreadyIn: true,
+      arenaSessionId: session.id,
       arenaActive: session.is_active,
       checkinCount: parseInt(currentCount),
       threshold: session.checkin_threshold,
@@ -97,6 +98,7 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
     success: true,
     alreadyIn: false,
     degraded: !redisOk,
+    arenaSessionId: session.id,
     arenaActive: session.is_active || justActivated,
     checkinCount: newCount,
     threshold: session.checkin_threshold,
