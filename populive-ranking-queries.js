@@ -77,29 +77,19 @@ async function getGlobalRanking({ limit = 100 }, { db }) {
   }));
 }
 
-/**
- * Posizione e punti di UN utente specifico — utile per mostrare
- * "tu sei #4" senza dover scaricare tutta la classifica quando
- * serve solo il proprio piazzamento (es. nella scheda profilo).
- * Usa query mirate (non scansiona l'intera classifica), quindi
- * resta veloce anche con centinaia di migliaia di utenti.
- */
 async function getUserRankingSummary({ userId, arenaSessionId, viewerId }, { db }) {
-  // Se chi guarda non è il proprietario del profilo, rispettiamo la
-  // sua scelta di autopresentazione — se ha disattivato la visibilità,
-  // restituiamo un risultato "nascosto" invece dei numeri veri.
+  const profile = await db.query(`SELECT display_name, photo_url, avatar_emoji FROM users WHERE id = $1`, [userId]);
+  const displayName = profile?.display_name || null;
+  const photoUrl = profile?.photo_url || null;
+  const avatarEmoji = profile?.avatar_emoji || '🙂';
+
   if (viewerId && viewerId !== userId) {
     const prefs = await db.query(`SELECT show_ranking_on_profile FROM users WHERE id = $1`, [userId]);
     if (prefs && prefs.show_ranking_on_profile === false) {
-      return { hidden: true, localRank: null, localPoints: null, globalRank: null, globalPoints: null };
+      return { hidden: true, localRank: null, localPoints: null, globalRank: null, globalPoints: null, displayName, photoUrl, avatarEmoji };
     }
   }
 
-  // Se non c'è ancora una sessione Arena (utente non ha fatto
-  // check-in stasera), non ha senso interrogare la classifica
-  // locale — passare una stringa vuota a una colonna UUID
-  // manderebbe il database in errore. Saltiamo direttamente ai
-  // dati globali, che esistono sempre.
   const hasValidSession = arenaSessionId && arenaSessionId.length > 0;
 
   let localPoints = 0;
@@ -144,6 +134,9 @@ async function getUserRankingSummary({ userId, arenaSessionId, viewerId }, { db 
     localPoints,
     globalRank: globalPoints > 0 ? parseInt(globalRankRow.rank) : null,
     globalPoints,
+    displayName,
+    photoUrl,
+    avatarEmoji,
   };
 }
 
