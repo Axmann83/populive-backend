@@ -2,24 +2,13 @@
  * ============================================================
  * POPULIVE — INVIO INTERAZIONI E RISPOSTA ALLE ROSE
  * ============================================================
- * Due famiglie di funzioni:
- *   1) Invio: chi manda un Like/Superlike/Rosa (con controllo
- *      del filtro contatti del destinatario)
- *   2) Risposta: chi riceve una Rosa decide cosa fare
- *      (accetta / rifiuta / ignora / mini-gioco per la variante +Like)
- * ============================================================
  */
 
 const { awardPoints, awardSenderPoints, LIKE_SENDER_FREE_LIMIT, GUESS_GAME_BONUS_POINTS, MAX_DISTINCT_VIEWS_PER_SESSION } = require('./populive-points-engine');
 const { openChatConversation } = require('./populive-chat-logic');
 
 
-// ------------------------------------------------------------
-// PARTE 0 — Like / Superlike semplici (senza Rosa allegata)
-// ------------------------------------------------------------
 async function sendInteraction({ senderId, receiverId, arenaSessionId, type }, { db, io, redis }) {
-  // type: 'like' | 'superlike'
-
   const blocked = await db.query(`
     SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2
   `, [receiverId, senderId]);
@@ -28,6 +17,12 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type }, {
   if (type === 'superlike') {
     const check = await canSendDirectContact({ senderId, receiverId }, { db });
     if (!check.allowed) return { success: false, reason: check.reason };
+
+    const sender = await db.query(`SELECT superlike_balance FROM users WHERE id = $1`, [senderId]);
+    if (!sender || sender.superlike_balance <= 0) {
+      return { success: false, reason: 'superlike_balance_exhausted' };
+    }
+    await db.query(`UPDATE users SET superlike_balance = superlike_balance - 1 WHERE id = $1`, [senderId]);
   }
 
   const countsForPoints = type === 'superlike'
@@ -58,12 +53,14 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type }, {
       }, { db, io });
       senderEarnedPoints = true;
     } else {
-      const underSenderLimit = await isUnderSenderLikeLimit(senderId, arenaSessionId, { db });
-      if (underSenderLimit) {
+      const { underLimit, justReachedLimit } = await isUnderSenderLikeLimit(senderId, arenaSessionId, { db });
+      if (underLimit) {
         await awardSenderPoints({
           senderId, arenaSessionId, source: 'like_received',
         }, { db, io });
         senderEarnedPoints = true;
+      } else if (justReachedLimit) {
+        io.to(`user_${senderId}`).emit('like_limit_reached', {});
       }
     }
   }
@@ -72,6 +69,7 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type }, {
     senderId: type === 'superlike' ? senderId : null,
     senderName: type === 'superlike' ? await getSenderName(senderId, { db }) : null,
     countedForPoints: countsForPoints,
+    points: receiverLocalPoints,
   });
 
   let reciprocalMatch = false;
@@ -155,8 +153,12 @@ async function isUnderSenderLikeLimit(senderId, arenaSessionId, { db }) {
   `, [senderId, arenaSessionId]);
 
   const purchasedCredits = await getPurchasedLikeCredits(senderId, arenaSessionId, { db });
+  const threshold = LIKE_SENDER_FREE_LIMIT + purchasedCredits;
 
-  return sentCount < (LIKE_SENDER_FREE_LIMIT + purchasedCredits);
+  return {
+    underLimit: sentCount < threshold,
+    justReachedLimit: sentCount === threshold,
+  };
 }
 
 async function getPurchasedLikeCredits(senderId, arenaSessionId, { db }) {
@@ -184,6 +186,12 @@ async function applyPurchaseEffect({ userId, productId, arenaSessionId, external
 
   switch (product.product_type) {
     case 'like_credits':
+      break;
+
+    case 'superlike_credits':
+      await db.query(`
+        UPDATE users SET superlike_balance = superlike_balance + $1 WHERE id = $2
+      `, [config.credits, userId]);
       break;
 
     case 'premium_subscription':
@@ -220,9 +228,6 @@ async function applyPurchaseEffect({ userId, productId, arenaSessionId, external
 }
 
 
-// ------------------------------------------------------------
-// VISITE AL PROFILO
-// ------------------------------------------------------------
 async function trackProfileView({ viewerId, viewedUserId, arenaSessionId }, { db, io }) {
   if (viewerId === viewedUserId) return { success: true, skipped: true };
 
@@ -280,20 +285,7 @@ async function canSendDirectContact({ senderId, receiverId }, { db }) {
 }
 
 
-// ------------------------------------------------------------
-// PARTE 1b — Invio di una Rosa (tutte e tre le varianti)
-// ------------------------------------------------------------
-async function sendRosa({ senderId, receiverId, arenaSessionId, drinkType, priceCents, tier }, { db, redis, io }) {
-
-  const blocked = await db.query(`
-    SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2
-  `, [receiverId, senderId]);
-  if (blocked) return { success: false, reason: 'blocked_by_receiver' };
-
-  if (tier === 'super') {
-    const check = await canSendDirectContact({ senderId, receiverId }, { db });
-    if (!check.allowed) return { success: false, reason: check.reason };
-  }
+async function createRosaRecord({ senderId, receiverId, arenaSessionId, drinkName, priceCents, tier, paymentStatus, stripeCheckoutSessionId }, { db, redis, io }) {
 
   let guessesRemaining = null;
   if (tier === 'like') {
@@ -302,17 +294,17 @@ async function sendRosa({ senderId, receiverId, arenaSessionId, drinkType, price
 
   const rosa = await db.query(`
     INSERT INTO roses (sender_id, receiver_id, arena_session_id, drink_type,
-                        price_cents, tier, guesses_remaining)
-    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        price_cents, tier, guesses_remaining, payment_status, stripe_checkout_session_id)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
     RETURNING id
-  `, [senderId, receiverId, arenaSessionId, drinkType, priceCents, tier, guessesRemaining]);
+  `, [senderId, receiverId, arenaSessionId, drinkName, priceCents, tier, guessesRemaining, paymentStatus, stripeCheckoutSessionId || null]);
 
   await awardSenderPoints({ senderId, arenaSessionId, source: `rosa_${tier}` }, { db, io });
 
   io.to(`user_${receiverId}`).emit('rosa_received', {
     rosaId: rosa.id,
     tier,
-    drinkType,
+    drinkType: drinkName,
     senderName: tier === 'super' ? await getSenderName(senderId, { db }) : null,
   });
 
@@ -334,9 +326,6 @@ async function computeGuessAllowance(arenaSessionId, { redis }) {
 }
 
 
-// ------------------------------------------------------------
-// PARTE 2 — Risposta a una Rosa: accetta / rifiuta / ignora
-// ------------------------------------------------------------
 async function respondToRosa({ rosaId, receiverId, action }, { db, io }) {
 
   const rosa = await db.query(`SELECT * FROM roses WHERE id = $1`, [rosaId]);
@@ -403,9 +392,6 @@ async function respondToRosa({ rosaId, receiverId, action }, { db, io }) {
   return { success: false, reason: 'invalid_action' };
 }
 
-// ------------------------------------------------------------
-// PARTE 3 — Mini-gioco della Rosa + Like: tentativo di indovinare
-// ------------------------------------------------------------
 async function attemptGuess({ rosaId, receiverId, guessedUserId }, { db, io }) {
 
   const rosa = await db.query(`SELECT * FROM roses WHERE id = $1`, [rosaId]);
@@ -501,4 +487,4 @@ async function getReceivedRoses({ userId }, { db }) {
   }));
 }
 
-module.exports = { canSendDirectContact, sendInteraction, trackProfileView, sendRosa, respondToRosa, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedRoses };
+module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createRosaRecord, respondToRosa, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedRoses };
