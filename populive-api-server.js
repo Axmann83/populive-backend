@@ -13,8 +13,9 @@ const Redis = require('ioredis');
 const { setupWebSocket } = require('./populive-websocket-rooms');
 const { handleCheckin } = require('./populive-checkin-logic');
 const {
-  sendInteraction, trackProfileView, sendRosa, respondToRosa, attemptGuess, respondToSuperlike, getReceivedRoses,
+  sendInteraction, trackProfileView, respondToRosa, attemptGuess, respondToSuperlike, getReceivedRoses,
 } = require('./populive-interactions-logic');
+const { initiateRosaPurchase, initiatePurchase, handleStripeWebhook } = require('./populive-payments-logic');
 const { sendMessage, getMessages, setChatKeepPreference } = require('./populive-chat-logic');
 const { startScheduler } = require('./populive-scheduler');
 const {
@@ -27,6 +28,17 @@ const { requestOtp, verifyOtp, verifyToken } = require('./populive-auth-logic');
 
 const app = express();
 app.use(cors());
+
+app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  try {
+    const result = await handleStripeWebhook(req.body, req.headers['stripe-signature'], { db, redis, io });
+    res.sendStatus(result.statusCode);
+  } catch (err) {
+    console.error('[stripe webhook] errore:', err);
+    res.sendStatus(500);
+  }
+});
+
 app.use(express.json());
 
 const httpServer = http.createServer(app);
@@ -42,7 +54,6 @@ function ah(fn) {
     Promise.resolve(fn(req, res, next)).catch(next);
   };
 }
-
 
 async function requireOnboarded(req, res, next) {
   const authHeader = req.headers['authorization'];
@@ -71,7 +82,6 @@ async function requireAuthOnly(req, res, next) {
   next();
 }
 
-
 app.post('/api/auth/request-otp', ah(async (req, res) => {
   const { phoneNumber } = req.body;
   const result = await requestOtp({ phoneNumber }, { db });
@@ -90,7 +100,6 @@ app.get('/api/auth/me', requireAuthOnly, ah(async (req, res) => {
   res.json({ success: true, userId: user.id, onboardingCompleted: user.onboarding_completed });
 }));
 
-
 app.post('/api/profile', requireAuthOnly, ah(async (req, res) => {
   const { displayName, bio, hashtagNames } = req.body;
   const result = await createProfile({ userId: req.userId, displayName, bio, hashtagNames }, { db });
@@ -107,20 +116,17 @@ app.post('/api/profile/:userId/onboarding', requireAuthOnly, ah(async (req, res)
   res.json(result);
 }));
 
-
 app.post('/api/checkin', requireOnboarded, ah(async (req, res) => {
   const { venueId } = req.body;
   const result = await handleCheckin({ userId: req.userId, venueId }, deps);
   res.json(result);
 }));
 
-
 app.get('/api/users/:userId/public-profile', requireOnboarded, ah(async (req, res) => {
   const { arenaSessionId } = req.query;
   const result = await getPublicProfile({ userId: req.params.userId, arenaSessionId }, { db });
   res.json(result);
 }));
-
 
 app.post('/api/interactions/send', requireOnboarded, ah(async (req, res) => {
   const { receiverId, arenaSessionId, type } = req.body;
@@ -134,7 +140,6 @@ app.post('/api/profile-views', requireOnboarded, ah(async (req, res) => {
   res.json(result);
 }));
 
-
 app.get('/api/users/:userId/roses', requireOnboarded, ah(async (req, res) => {
   const roses = await getReceivedRoses({ userId: req.userId }, deps);
   res.json({ success: true, roses });
@@ -142,9 +147,23 @@ app.get('/api/users/:userId/roses', requireOnboarded, ah(async (req, res) => {
 
 app.post('/api/roses/send', requireOnboarded, ah(async (req, res) => {
   const { receiverId, arenaSessionId, drinkProductId, tier } = req.body;
-  const result = await sendRosa({
+  const result = await initiateRosaPurchase({
     senderId: req.userId, receiverId, arenaSessionId, drinkProductId, tier,
   }, deps);
+  res.json(result);
+}));
+
+app.get('/api/products', ah(async (req, res) => {
+  const products = await db.queryAll(`
+    SELECT id, sku, display_name, description, price_cents, product_type
+    FROM iap_products WHERE is_active = true ORDER BY price_cents ASC
+  `);
+  res.json({ success: true, products });
+}));
+
+app.post('/api/purchases/initiate', requireOnboarded, ah(async (req, res) => {
+  const { productId, arenaSessionId } = req.body;
+  const result = await initiatePurchase({ userId: req.userId, productId, arenaSessionId }, { db });
   res.json(result);
 }));
 
@@ -164,13 +183,11 @@ app.post('/api/roses/:rosaId/guess', requireOnboarded, ah(async (req, res) => {
   res.json(result);
 }));
 
-
 app.get('/api/venues/:venueId/report', ah(async (req, res) => {
   const { fromDate, toDate } = req.query;
   const result = await generateVenueReport({ venueId: req.params.venueId, fromDate, toDate }, { db });
   res.json(result);
 }));
-
 
 app.post('/api/table/join', requireOnboarded, ah(async (req, res) => {
   const { tableQrCode, arenaSessionId, wantsToBeConnector } = req.body;
@@ -183,7 +200,6 @@ app.post('/api/table/join', requireOnboarded, ah(async (req, res) => {
   }, deps);
   res.json(result);
 }));
-
 
 app.get('/api/arenas/:arenaSessionId/ranking', ah(async (req, res) => {
   const ranking = await getLocalRanking({ arenaSessionId: req.params.arenaSessionId }, { db });
@@ -205,7 +221,6 @@ app.get('/api/users/:userId/ranking-summary', ah(async (req, res) => {
   res.json({ success: true, summary });
 }));
 
-
 app.get('/api/venues/:venueId/drinks', ah(async (req, res) => {
   const drinks = await db.queryAll(`
     SELECT dp.id, dp.name, dp.base_price_cents, dp.sponsor_discount_cents, bs.name AS sponsor_name
@@ -217,7 +232,6 @@ app.get('/api/venues/:venueId/drinks', ah(async (req, res) => {
   `, [req.params.venueId]);
   res.json({ success: true, drinks });
 }));
-
 
 app.post('/api/roses/:rosaId/redeem', ah(async (req, res) => {
   const { redeemCode } = req.body;
@@ -247,7 +261,6 @@ app.get('/api/arenas/:arenaSessionId/guess-candidates', ah(async (req, res) => {
   res.json({ success: true, candidates });
 }));
 
-
 app.post('/api/interactions/:interactionId/respond', requireOnboarded, ah(async (req, res) => {
   const { action } = req.body;
   const result = await respondToSuperlike({
@@ -255,7 +268,6 @@ app.post('/api/interactions/:interactionId/respond', requireOnboarded, ah(async 
   }, deps);
   res.json(result);
 }));
-
 
 app.post('/api/chat/:conversationId/messages', requireOnboarded, ah(async (req, res) => {
   const { body } = req.body;
@@ -279,7 +291,6 @@ app.post('/api/chat/:conversationId/keep-preference', requireOnboarded, ah(async
   }, deps);
   res.json(result);
 }));
-
 
 app.get('/api/profile/:userId/settings', requireOnboarded, ah(async (req, res) => {
   const user = await db.query(`
@@ -324,12 +335,10 @@ app.post('/api/profile/:userId/settings', requireOnboarded, ah(async (req, res) 
   res.json({ success: true });
 }));
 
-
 app.use((err, req, res, next) => {
   console.error('[errore non gestito]', err);
   res.status(500).json({ success: false, reason: 'internal_error' });
 });
-
 
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => {
