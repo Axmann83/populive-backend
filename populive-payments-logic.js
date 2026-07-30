@@ -2,26 +2,6 @@
  * ============================================================
  * POPULIVE — PAGAMENTI VERI PER LE ROSE
  * ============================================================
- * Fino ad ora, inviare una Rosa non addebitava soldi a nessuno —
- * il prezzo veniva solo scritto nel database, senza nessun
- * pagamento reale dietro. Questo file chiude quel buco.
- *
- * Il flusso, in ordine:
- *   1) L'utente sceglie drink + variante e tocca "Invia Rosa"
- *   2) Controlliamo PRIMA di tutto se non deve nemmeno pagare
- *      (account di prova, o ha una Rosa gratis settimanale
- *      disponibile) — in quel caso la Rosa nasce SUBITO, come
- *      prima, senza toccare Stripe
- *   3) Altrimenti, creiamo una vera sessione di pagamento Stripe
- *      e mandiamo l'utente a pagare con la sua carta
- *   4) SOLO quando Stripe conferma il pagamento (tramite webhook,
- *      mai fidandosi di quello che dice il telefono del cliente),
- *      la Rosa nasce davvero nel database
- *
- * Il prezzo non arriva MAI dal frontend — lo recuperiamo sempre
- * noi dal catalogo drink del locale, altrimenti chiunque potrebbe
- * mandare un prezzo finto (es. 1 centesimo) per una Rosa vera.
- * ============================================================
  */
 
 const Stripe = require('stripe');
@@ -34,13 +14,6 @@ function getStripeClient() {
 
 const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL || 'https://populive-frontend-production.up.railway.app';
 
-/**
- * ============================================================
- * ACQUISTO GENERICO — copre TUTTO il catalogo (iap_products):
- * Premium, crediti Like/Superlike extra, badge Verificato, e
- * qualunque cosa vorrete aggiungere in futuro.
- * ============================================================
- */
 async function initiatePurchase({ userId, productId, arenaSessionId }, { db }) {
   const product = await db.query(`
     SELECT * FROM iap_products WHERE id = $1 AND is_active = true
@@ -81,6 +54,13 @@ async function initiatePurchase({ userId, productId, arenaSessionId }, { db }) {
 }
 
 async function initiateRosaPurchase({ senderId, receiverId, arenaSessionId, drinkProductId, tier }, { db, redis, io }) {
+
+  // Stesso controllo reale di sendInteraction — nessuno dovrebbe
+  // poter "comprare" una Rosa per se stesso, né tantomeno pagare
+  // davvero per farlo.
+  if (senderId === receiverId) {
+    return { success: false, reason: 'cannot_interact_with_self' };
+  }
 
   const blocked = await db.query(`
     SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2
