@@ -9,6 +9,18 @@ const { openChatConversation } = require('./populive-chat-logic');
 
 
 async function sendInteraction({ senderId, receiverId, arenaSessionId, type }, { db, io, redis }) {
+  // type: 'like' | 'superlike'
+
+  // Controllo VERO, non solo un'interfaccia che nasconde il
+  // bottone — un'interazione verso se stessi va bloccata qui,
+  // indipendentemente da come la richiesta sia arrivata (un
+  // client vecchio in cache, una chiamata diretta all'endpoint,
+  // ecc.). Nascondere il proprio profilo dal radar non basta da
+  // solo: chi controlla i punti deve essere il server, sempre.
+  if (senderId === receiverId) {
+    return { success: false, reason: 'cannot_interact_with_self' };
+  }
+
   const blocked = await db.query(`
     SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2
   `, [receiverId, senderId]);
