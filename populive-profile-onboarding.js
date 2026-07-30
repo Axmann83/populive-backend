@@ -2,14 +2,6 @@
  * ============================================================
  * POPULIVE — CREAZIONE PROFILO (primo accesso)
  * ============================================================
- * Il flusso previsto, come deciso insieme:
- *   1) Dati base (nome, foto, bio) + hashtag di autotargetizzazione
- *   2) Schermata di consenso (base fissa uguale per tutti + bonus
- *      opzionali) — MAI saltabile
- *   3) Solo dopo aver visto ed espresso una scelta sul consenso,
- *      onboarding_completed diventa true
- *   4) Solo con onboarding_completed = true si può fare check-in
- * ============================================================
  */
 
 const MAX_HASHTAGS_PER_USER = 5;
@@ -112,7 +104,7 @@ async function requireCompletedOnboarding(userId, { db }) {
 
 async function getPublicProfile({ userId, arenaSessionId }, { db }) {
   const profile = await db.query(`
-    SELECT display_name, photo_url, avatar_emoji, bio
+    SELECT display_name, photo_url, avatar_emoji, bio, instant_influencer_category
     FROM users WHERE id = $1
   `, [userId]);
 
@@ -123,6 +115,15 @@ async function getPublicProfile({ userId, arenaSessionId }, { db }) {
     JOIN user_hashtags uh ON uh.hashtag_id = h.id
     WHERE uh.user_id = $1
   `, [userId]);
+
+  let sponsoredProducts = [];
+  if (profile.instant_influencer_category) {
+    const productRows = await db.queryAll(`
+      SELECT product_name, product_url FROM instant_influencer_products
+      WHERE user_id = $1 ORDER BY sort_order ASC, created_at ASC
+    `, [userId]);
+    sponsoredProducts = productRows.map((p) => ({ name: p.product_name, url: p.product_url }));
+  }
 
   let isTopConnector = false;
   let isTopSpender = false;
@@ -154,6 +155,8 @@ async function getPublicProfile({ userId, arenaSessionId }, { db }) {
       isTopConnector,
       isTopSpender,
       isFounder: !!founderRow,
+      instantInfluencerCategory: profile.instant_influencer_category || null,
+      sponsoredProducts,
     },
   };
 }
