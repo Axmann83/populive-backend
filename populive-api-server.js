@@ -21,9 +21,9 @@ const { startScheduler } = require('./populive-scheduler');
 const {
   createProfile, setProfilePhoto, completeOnboarding, requireCompletedOnboarding, getPublicProfile,
 } = require('./populive-profile-onboarding');
-const { generateVenueReport } = require('./populive-venue-insights');
+const { generateVenueReport, getPopularVenuesNow } = require('./populive-venue-insights');
 const { joinSquad } = require('./populive-connector-engine');
-const { getLocalRanking, getGlobalRanking, getUserRankingSummary } = require('./populive-ranking-queries');
+const { getLocalRanking, getGlobalRanking, getUserRankingSummary, getWelcomeBackSummary } = require('./populive-ranking-queries');
 const { requestOtp, verifyOtp, verifyToken } = require('./populive-auth-logic');
 
 const app = express();
@@ -101,8 +101,8 @@ app.get('/api/auth/me', requireAuthOnly, ah(async (req, res) => {
 }));
 
 app.post('/api/profile', requireAuthOnly, ah(async (req, res) => {
-  const { displayName, bio, hashtagNames } = req.body;
-  const result = await createProfile({ userId: req.userId, displayName, bio, hashtagNames }, { db });
+  const { displayName, bio, hashtagNames, genderForStats } = req.body;
+  const result = await createProfile({ userId: req.userId, displayName, bio, hashtagNames, genderForStats }, { db });
   res.json(result);
 }));
 
@@ -219,6 +219,16 @@ app.get('/api/users/:userId/ranking-summary', ah(async (req, res) => {
   const { valid, userId: viewerId } = token ? verifyToken(token) : { valid: false };
   const summary = await getUserRankingSummary({ userId: req.params.userId, arenaSessionId, viewerId: valid ? viewerId : null }, { db });
   res.json({ success: true, summary });
+}));
+
+app.get('/api/users/:userId/welcome-back', requireOnboarded, ah(async (req, res) => {
+  const result = await getWelcomeBackSummary({ userId: req.userId }, { db });
+  res.json(result);
+}));
+
+app.get('/api/venues/popular-now', ah(async (req, res) => {
+  const venues = await getPopularVenuesNow({}, { db });
+  res.json({ success: true, venues });
 }));
 
 app.get('/api/venues/:venueId/drinks', ah(async (req, res) => {
