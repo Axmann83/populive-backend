@@ -6,7 +6,9 @@
 
 const MAX_HASHTAGS_PER_USER = 5;
 
-async function createProfile({ userId, displayName, bio, hashtagNames }, { db }) {
+const ALLOWED_GENDER_VALUES = ['male', 'female', 'other'];
+
+async function createProfile({ userId, displayName, bio, hashtagNames, genderForStats }, { db }) {
 
   if (!displayName || displayName.trim().length < 2) {
     return { success: false, reason: 'display_name_required' };
@@ -14,12 +16,13 @@ async function createProfile({ userId, displayName, bio, hashtagNames }, { db })
   if (hashtagNames && hashtagNames.length > MAX_HASHTAGS_PER_USER) {
     return { success: false, reason: 'too_many_hashtags', max: MAX_HASHTAGS_PER_USER };
   }
+  const validatedGender = ALLOWED_GENDER_VALUES.includes(genderForStats) ? genderForStats : null;
 
   const user = await db.query(`
-    UPDATE users SET display_name = $1, bio = $2
-    WHERE id = $3
+    UPDATE users SET display_name = $1, bio = $2, gender_for_stats = $3
+    WHERE id = $4
     RETURNING id
-  `, [displayName.trim(), bio || null, userId]);
+  `, [displayName.trim(), bio || null, validatedGender, userId]);
 
   if (!user) return { success: false, reason: 'user_not_found' };
 
