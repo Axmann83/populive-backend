@@ -2,14 +2,6 @@
  * ============================================================
  * POPULIVE — LETTURA CLASSIFICHE (locale e globale)
  * ============================================================
- * Finora avevamo scritto solo la logica che GENERA punti
- * (points_ledger). Qui li leggiamo aggregati, in due modi:
- *   - Locale: somma filtrata per una singola arena_session
- *   - Globale: somma di TUTTA la storia di un utente
- * Nessuna tabella "classifica" separata da mantenere sincronizzata:
- * entrambe le viste derivano dalla stessa tabella points_ledger,
- * quindi non possono mai andare "fuori sincrono" tra loro.
- * ============================================================
  */
 
 async function getLocalRanking({ arenaSessionId }, { db }) {
@@ -140,4 +132,46 @@ async function getUserRankingSummary({ userId, arenaSessionId, viewerId }, { db 
   };
 }
 
-module.exports = { getLocalRanking, getGlobalRanking, getUserRankingSummary };
+async function getWelcomeBackSummary({ userId }, { db }) {
+  const user = await db.query(`SELECT last_seen_at FROM users WHERE id = $1`, [userId]);
+  if (!user) return { success: false, reason: 'user_not_found' };
+
+  const since = user.last_seen_at;
+
+  const pointsRow = await db.query(`
+    SELECT COALESCE(SUM(points), 0) AS total FROM points_ledger
+    WHERE user_id = $1 AND created_at > $2
+  `, [userId, since]);
+  const pointsEarned = parseInt(pointsRow.total) || 0;
+
+  const newLikes = await db.query(`
+    SELECT COUNT(*) FROM interactions
+    WHERE receiver_id = $1 AND type = 'like' AND created_at > $2
+  `, [userId, since]);
+
+  const newSuperlikes = await db.query(`
+    SELECT COUNT(*) FROM interactions
+    WHERE receiver_id = $1 AND type = 'superlike' AND created_at > $2
+  `, [userId, since]);
+
+  const newRoses = await db.query(`
+    SELECT COUNT(*) FROM roses
+    WHERE receiver_id = $1 AND created_at > $2
+  `, [userId, since]);
+
+  await db.query(`UPDATE users SET last_seen_at = now() WHERE id = $1`, [userId]);
+
+  const hasNews = pointsEarned > 0 || newLikes > 0 || newSuperlikes > 0 || newRoses > 0;
+
+  return {
+    success: true,
+    hasNews,
+    pointsEarned,
+    newLikes: parseInt(newLikes) || 0,
+    newSuperlikes: parseInt(newSuperlikes) || 0,
+    newRoses: parseInt(newRoses) || 0,
+  };
+}
+
+
+module.exports = { getLocalRanking, getGlobalRanking, getUserRankingSummary, getWelcomeBackSummary };
