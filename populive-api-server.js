@@ -2,6 +2,13 @@
  * ============================================================
  * POPULIVE — SERVER API
  * ============================================================
+ * Questo è il "collante": prende tutta la logica che abbiamo già
+ * scritto (funzioni pure, senza sapere nulla del web) e la espone
+ * come indirizzi HTTP veri che il frontend può chiamare con una
+ * richiesta fetch(). Ogni endpoint fa tre cose, sempre nello stesso
+ * ordine: legge cosa manda il frontend → chiama la funzione di
+ * logica già scritta → risponde con il risultato.
+ * ============================================================
  */
 
 const express = require('express');
@@ -19,7 +26,7 @@ const { initiateRosaPurchase, initiatePurchase, handleStripeWebhook } = require(
 const { sendMessage, getMessages, setChatKeepPreference } = require('./populive-chat-logic');
 const { startScheduler } = require('./populive-scheduler');
 const {
-  createProfile, setProfilePhoto, completeOnboarding, requireCompletedOnboarding, getPublicProfile,
+  createProfile, setProfilePhoto, updateProfileDetails, completeOnboarding, requireCompletedOnboarding, getPublicProfile,
 } = require('./populive-profile-onboarding');
 const { generateVenueReport, getPopularVenuesNow } = require('./populive-venue-insights');
 const { joinSquad } = require('./populive-connector-engine');
@@ -27,8 +34,17 @@ const { getLocalRanking, getGlobalRanking, getUserRankingSummary, getWelcomeBack
 const { requestOtp, verifyOtp, verifyToken } = require('./populive-auth-logic');
 
 const app = express();
-app.use(cors());
+app.use(cors()); // permette al frontend (su un altro indirizzo) di chiamare questo backend
 
+// ------------------------------------------------------------
+// WEBHOOK STRIPE — deve stare QUI, PRIMA di express.json() qui
+// sotto. Stripe firma il corpo "grezzo" della richiesta per
+// dimostrare che il messaggio arriva davvero da loro — se lo
+// lasciassimo passare prima dal parser JSON generale, quel corpo
+// verrebbe già trasformato in un oggetto e la firma non
+// combacerebbe più con niente. Ogni altro endpoint dell'app
+// continua invece a usare JSON normalmente, come sempre.
+// ------------------------------------------------------------
 app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   try {
     const result = await handleStripeWebhook(req.body, req.headers['stripe-signature'], { db, redis, io });
@@ -43,19 +59,42 @@ app.use(express.json());
 
 const httpServer = http.createServer(app);
 
+// Connessioni ai due database, condivise da tutte le richieste
+// (si aprono una volta all'avvio, non a ogni singola chiamata).
 const db = createDb(process.env.DATABASE_URL);
 const redis = new Redis(process.env.REDIS_URL);
 const io = setupWebSocket(httpServer, { redis, db });
 
+// Piccola utility ripetuta in ogni endpoint: le tre dipendenze che
+// tutte le funzioni di logica si aspettano di ricevere.
 const deps = { db, redis, io };
 
+/**
+ * "Avvolgitore" per ogni endpoint — invece di scrivere un try/catch
+ * dentro OGNI singola funzione (facile da dimenticare, e infatti
+ * l'abbiamo dimenticato più volte), avvolgiamo qui ogni handler UNA
+ * volta sola: se la funzione dentro lancia un errore per qualunque
+ * motivo, viene automaticamente intercettato e passato al gestore
+ * di errori globale in fondo al file — mai più un crash che il
+ * frontend vede come "errore di rete" senza sapere cosa sia successo
+ * davvero.
+ */
 function ah(fn) {
   return (req, res, next) => {
     Promise.resolve(fn(req, res, next)).catch(next);
   };
 }
 
+
+// ------------------------------------------------------------
+// MIDDLEWARE — verifica che l'utente esista e abbia completato
+// l'onboarding, PRIMA di eseguire qualunque azione "vera"
+// dell'app. Non tocca handleCheckin/sendRosa/ecc: si mette davanti.
+// ------------------------------------------------------------
 async function requireOnboarded(req, res, next) {
+  // Ora l'identità arriva da un token firmato (JWT), mai più da un
+  // header che chiunque poteva scrivere a mano per "diventare" un
+  // altro utente — chiuso il buco di sicurezza che avevamo dall'inizio.
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
   if (!token) return res.status(401).json({ success: false, reason: 'missing_token' });
@@ -70,6 +109,13 @@ async function requireOnboarded(req, res, next) {
   next();
 }
 
+/**
+ * Versione "leggera" dello stesso controllo, usata SOLO nel breve
+ * momento tra il login e il completamento dell'onboarding — qui
+ * basta un token valido, non serve ancora aver finito la
+ * registrazione (altrimenti nessun nuovo utente potrebbe mai
+ * completarla).
+ */
 async function requireAuthOnly(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
@@ -82,6 +128,11 @@ async function requireAuthOnly(req, res, next) {
   next();
 }
 
+
+// ------------------------------------------------------------
+// AUTENTICAZIONE — telefono + SMS. Nessun requireOnboarded qui,
+// ovviamente: è proprio il percorso per OTTENERE il token.
+// ------------------------------------------------------------
 app.post('/api/auth/request-otp', ah(async (req, res) => {
   const { phoneNumber } = req.body;
   const result = await requestOtp({ phoneNumber }, { db });
@@ -94,12 +145,22 @@ app.post('/api/auth/verify-otp', ah(async (req, res) => {
   res.json(result);
 }));
 
+// Usato quando l'app si riapre con un token già salvato — dice
+// se quel token è ancora valido e se l'onboarding è completo,
+// senza richiedere che l'onboarding sia già fatto (a differenza
+// di requireOnboarded).
 app.get('/api/auth/me', requireAuthOnly, ah(async (req, res) => {
   const user = await db.query(`SELECT id, onboarding_completed FROM users WHERE id = $1`, [req.userId]);
   if (!user) return res.json({ success: false, reason: 'user_not_found' });
   res.json({ success: true, userId: user.id, onboardingCompleted: user.onboarding_completed });
 }));
 
+
+// ------------------------------------------------------------
+// PROFILO / ONBOARDING — richiede un token valido (sei loggato),
+// ma NON ancora onboarding_completed (è proprio quello che stiamo
+// per completare qui).
+// ------------------------------------------------------------
 app.post('/api/profile', requireAuthOnly, ah(async (req, res) => {
   const { displayName, bio, hashtagNames, genderForStats } = req.body;
   const result = await createProfile({ userId: req.userId, displayName, bio, hashtagNames, genderForStats }, { db });
@@ -111,25 +172,44 @@ app.post('/api/profile/:userId/photo', requireAuthOnly, ah(async (req, res) => {
   res.json(result);
 }));
 
+app.post('/api/profile/:userId/edit', requireOnboarded, ah(async (req, res) => {
+  const { bio, hashtagNames } = req.body;
+  const result = await updateProfileDetails({ userId: req.userId, bio, hashtagNames }, { db });
+  res.json(result);
+}));
+
 app.post('/api/profile/:userId/onboarding', requireAuthOnly, ah(async (req, res) => {
   const result = await completeOnboarding({ userId: req.userId, consentChoices: req.body }, { db });
   res.json(result);
 }));
 
+
+// ------------------------------------------------------------
+// CHECK-IN
+// ------------------------------------------------------------
 app.post('/api/checkin', requireOnboarded, ah(async (req, res) => {
   const { venueId } = req.body;
   const result = await handleCheckin({ userId: req.userId, venueId }, deps);
   res.json(result);
 }));
 
+
+// ------------------------------------------------------------
+// PROFILO PUBBLICO — quello mostrato a schermo intero quando si
+// tocca qualcuno nel radar (foto, nome, hashtag, badge di sessione).
+// ------------------------------------------------------------
 app.get('/api/users/:userId/public-profile', requireOnboarded, ah(async (req, res) => {
   const { arenaSessionId } = req.query;
   const result = await getPublicProfile({ userId: req.params.userId, arenaSessionId }, { db });
   res.json(result);
 }));
 
+
+// ------------------------------------------------------------
+// INTERAZIONI (Like / Superlike / visite profilo)
+// ------------------------------------------------------------
 app.post('/api/interactions/send', requireOnboarded, ah(async (req, res) => {
-  const { receiverId, arenaSessionId, type } = req.body;
+  const { receiverId, arenaSessionId, type } = req.body; // type: 'like' | 'superlike'
   const result = await sendInteraction({ senderId: req.userId, receiverId, arenaSessionId, type }, deps);
   res.json(result);
 }));
@@ -140,7 +220,15 @@ app.post('/api/profile-views', requireOnboarded, ah(async (req, res) => {
   res.json(result);
 }));
 
+
+// ------------------------------------------------------------
+// ROSE
+// ------------------------------------------------------------
 app.get('/api/users/:userId/roses', requireOnboarded, ah(async (req, res) => {
+  // Le Rose ricevute sono dati privati (mittente, drink scelto) —
+  // SOLO il proprietario può vederle, mai un ID scritto a mano
+  // nell'indirizzo. Usiamo sempre req.userId (dal token verificato),
+  // ignorando qualunque cosa sia scritta nell'URL.
   const roses = await getReceivedRoses({ userId: req.userId }, deps);
   res.json({ success: true, roses });
 }));
@@ -153,6 +241,11 @@ app.post('/api/roses/send', requireOnboarded, ah(async (req, res) => {
   res.json(result);
 }));
 
+// ------------------------------------------------------------
+// CATALOGO ACQUISTI GENERICO — Premium, crediti Like/Superlike
+// extra, badge Verificato, e qualunque cosa si aggiunga in futuro.
+// Stesso motore di pagamento della Rosa, generalizzato.
+// ------------------------------------------------------------
 app.get('/api/products', ah(async (req, res) => {
   const products = await db.queryAll(`
     SELECT id, sku, display_name, description, price_cents, product_type
@@ -168,7 +261,7 @@ app.post('/api/purchases/initiate', requireOnboarded, ah(async (req, res) => {
 }));
 
 app.post('/api/roses/:rosaId/respond', requireOnboarded, ah(async (req, res) => {
-  const { action } = req.body;
+  const { action } = req.body; // 'accept' | 'reject' | 'ignore'
   const result = await respondToRosa({
     rosaId: req.params.rosaId, receiverId: req.userId, action,
   }, deps);
@@ -183,16 +276,29 @@ app.post('/api/roses/:rosaId/guess', requireOnboarded, ah(async (req, res) => {
   res.json(result);
 }));
 
+
+// ------------------------------------------------------------
+// REPORT PER I LOCALI (v. populive-venue-insights.js)
+// ------------------------------------------------------------
 app.get('/api/venues/:venueId/report', ah(async (req, res) => {
+  // NOTA: in produzione questo endpoint va protetto — solo il
+  // team o il proprietario autenticato del locale specifico deve
+  // poterlo chiamare, non chiunque conosca l'indirizzo.
   const { fromDate, toDate } = req.query;
   const result = await generateVenueReport({ venueId: req.params.venueId, fromDate, toDate }, { db });
   res.json(result);
 }));
 
+
+// ------------------------------------------------------------
+// TAVOLO — "Aggancia il tuo tavolo" (bottone dentro l'app, non un
+// secondo link/QR esterno — fotocamera nativa dell'app che legge
+// il QR fisico sul tavolo e collega la sessione corrente)
+// ------------------------------------------------------------
 app.post('/api/table/join', requireOnboarded, ah(async (req, res) => {
   const { tableQrCode, arenaSessionId, wantsToBeConnector } = req.body;
   const result = await joinSquad({
-    connectorId: undefined,
+    connectorId: undefined,  // lascia decidere a joinSquad in base allo stato del tavolo
     memberId: req.userId,
     arenaSessionId,
     tableQrCode,
@@ -201,6 +307,12 @@ app.post('/api/table/join', requireOnboarded, ah(async (req, res) => {
   res.json(result);
 }));
 
+
+// ------------------------------------------------------------
+// CLASSIFICHE (locale e globale) — sola lettura, derivate sempre
+// dallo stesso points_ledger, mai una tabella separata da tenere
+// sincronizzata a mano.
+// ------------------------------------------------------------
 app.get('/api/arenas/:arenaSessionId/ranking', ah(async (req, res) => {
   const ranking = await getLocalRanking({ arenaSessionId: req.params.arenaSessionId }, { db });
   res.json({ success: true, ranking });
@@ -214,6 +326,10 @@ app.get('/api/ranking/global', ah(async (req, res) => {
 
 app.get('/api/users/:userId/ranking-summary', ah(async (req, res) => {
   const { arenaSessionId } = req.query;
+  // Controllo "morbido": se c'è un token valido sappiamo chi guarda
+  // (utile per il proprietario, che deve vedere sempre i suoi dati
+  // veri), ma non blocchiamo la richiesta se manca — guardare una
+  // classifica resta possibile anche senza login.
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
   const { valid, userId: viewerId } = token ? verifyToken(token) : { valid: false };
@@ -231,6 +347,10 @@ app.get('/api/venues/popular-now', ah(async (req, res) => {
   res.json({ success: true, venues });
 }));
 
+
+// ------------------------------------------------------------
+// DRINK DISPONIBILI IN UN LOCALE (per la schermata di invio Rosa)
+// ------------------------------------------------------------
 app.get('/api/venues/:venueId/drinks', ah(async (req, res) => {
   const drinks = await db.queryAll(`
     SELECT dp.id, dp.name, dp.base_price_cents, dp.sponsor_discount_cents, bs.name AS sponsor_name
@@ -243,6 +363,16 @@ app.get('/api/venues/:venueId/drinks', ah(async (req, res) => {
   res.json({ success: true, drinks });
 }));
 
+
+// ------------------------------------------------------------
+// RISCATTO REALE AL BANCONE — chiamato dal telefono del CLIENTE
+// nel momento in cui il bartender stesso tocca il sigillo attivo
+// sul suo schermo. Non serve nessun dispositivo o account separato
+// per lo staff: il tocco del bartender sul telefono del cliente è
+// insieme la verifica antifrode (il flash dimostra che è dal vivo)
+// e la conferma di riscatto — un solo gesto, zero attrito operativo
+// per il locale.
+// ------------------------------------------------------------
 app.post('/api/roses/:rosaId/redeem', ah(async (req, res) => {
   const { redeemCode } = req.body;
 
@@ -261,6 +391,11 @@ app.post('/api/roses/:rosaId/redeem', ah(async (req, res) => {
   res.json({ success: true });
 }));
 
+// ------------------------------------------------------------
+// CANDIDATI PER IL MINIGIOCO ROSA+LIKE — profili di base di chi
+// ha fatto check-in in questa Arena (nome, foto), usati per la
+// schermata "indovina chi ti ha inviato la Rosa".
+// ------------------------------------------------------------
 app.get('/api/arenas/:arenaSessionId/guess-candidates', ah(async (req, res) => {
   const candidates = await db.queryAll(`
     SELECT DISTINCT u.id AS user_id, u.display_name, u.avatar_emoji, u.photo_url
@@ -271,6 +406,10 @@ app.get('/api/arenas/:arenaSessionId/guess-candidates', ah(async (req, res) => {
   res.json({ success: true, candidates });
 }));
 
+
+// ------------------------------------------------------------
+// RISPOSTA A UN SUPERLIKE SEMPLICE — accetta/rifiuta/lascia in sospeso
+// ------------------------------------------------------------
 app.post('/api/interactions/:interactionId/respond', requireOnboarded, ah(async (req, res) => {
   const { action } = req.body;
   const result = await respondToSuperlike({
@@ -279,6 +418,11 @@ app.post('/api/interactions/:interactionId/respond', requireOnboarded, ah(async 
   res.json(result);
 }));
 
+
+// ------------------------------------------------------------
+// CHAT 1-A-1 — invio e lettura messaggi, sempre solo tra i due
+// partecipanti della conversazione
+// ------------------------------------------------------------
 app.post('/api/chat/:conversationId/messages', requireOnboarded, ah(async (req, res) => {
   const { body } = req.body;
   const result = await sendMessage({
@@ -302,7 +446,16 @@ app.post('/api/chat/:conversationId/keep-preference', requireOnboarded, ah(async
   res.json(result);
 }));
 
+
+// ------------------------------------------------------------
+// IMPOSTAZIONI — richiamabili in ogni momento (a differenza del
+// consenso di onboarding, visto una sola volta) per cambiare idea
+// liberamente su privacy e autopresentazione.
+// ------------------------------------------------------------
 app.get('/api/profile/:userId/settings', requireOnboarded, ah(async (req, res) => {
+  // Le tue impostazioni sono tue soltanto — SEMPRE req.userId dal
+  // token, mai il pezzo di indirizzo che chiunque potrebbe cambiare
+  // a mano per leggere/scrivere le impostazioni di un altro.
   const user = await db.query(`
     SELECT show_ranking_on_profile, sponsored_missions_enabled,
            appears_in_historical_search, receive_roses_enabled, contact_filter
@@ -328,6 +481,9 @@ app.post('/api/profile/:userId/settings', requireOnboarded, ah(async (req, res) 
     appearsInHistoricalSearch, receiveRosesEnabled, contactFilter,
   } = req.body;
 
+  // Stessa protezione qui, ancora più importante: senza questo,
+  // chiunque loggato avrebbe potuto RISCRIVERE le impostazioni di
+  // un altro utente semplicemente cambiando l'ID nell'indirizzo.
   await db.query(`
     UPDATE users SET
       show_ranking_on_profile = $1,
@@ -345,14 +501,27 @@ app.post('/api/profile/:userId/settings', requireOnboarded, ah(async (req, res) 
   res.json({ success: true });
 }));
 
+
+// ------------------------------------------------------------
+// GESTORE DI ERRORI GLOBALE — l'ultimo pezzo del puzzle: qualunque
+// errore catturato da "ah()" sopra arriva qui, invece che a Express
+// di default (che risponderebbe con una pagina HTML illeggibile
+// per il frontend, facendo credere a un problema di rete quando
+// invece è un errore interno preciso). Da qui in poi, OGNI errore
+// interno arriva al frontend come JSON vero, sempre.
+// ------------------------------------------------------------
 app.use((err, req, res, next) => {
   console.error('[errore non gestito]', err);
   res.status(500).json({ success: false, reason: 'internal_error' });
 });
 
+
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => {
   console.log(`PopuLive API in ascolto sulla porta ${PORT}`);
+  // Il motore a orari parte insieme al server — gira per sempre in
+  // background, controllando ogni pochi minuti se qualche Arena va
+  // aperta o chiusa. Nessun intervento manuale necessario da qui in poi.
   startScheduler({ db, redis, io });
   console.log('Motore a orari avviato.');
 });
