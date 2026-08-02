@@ -2,7 +2,7 @@
  * ============================================================
  * POPULIVE — ADATTATORE DATABASE
  * ============================================================
- * In tutto il codice scritto finora (handleCheckin, sendRosa,
+ * In tutto il codice scritto finora (handleCheckin, sendPulse,
  * awardPoints, ecc.) abbiamo sempre chiamato:
  *   - db.query(sql, params)    → ci aspettiamo UNA riga (o niente)
  *   - db.queryAll(sql, params) → ci aspettiamo un ARRAY di righe
