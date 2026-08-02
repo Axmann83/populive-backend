@@ -5,6 +5,7 @@
  * Un solo posto dove vivono tutti i valori — quando li
  * bilanceremo con i dati reali dei test, si cambia solo qui,
  * non in dieci funzioni sparse per il codice.
+ * Tutti i valori sono INDICATIVI, da tarare con i numeri veri.
  * ============================================================
  */
 
@@ -50,6 +51,7 @@ const MULTIPLIERS = {
   founder_global: 1.5,   // braccialetto founder — SOLO sul globale, mai sul locale (già deciso)
   sender_share:   0.3,   // chi INVIA un'interazione riceve il 30% del punteggio corrispondente
   top_connector_vote: 1.5, // il voto di un Top Connector vale 1.5x — solo la prima volta per persona per like/superlike, sempre per la Rosa (già limitata dal costo reale)
+  consent_per_toggle: 0.05, // +5% per ciascuna delle 3 scelte facoltative attive in Impostazioni (missioni sponsorizzate/bacheca storica/ricevi Rose) — cumulabile fino a +15% con tutte e tre attive. Si applica SIA ai punti che ricevi SIA a quelli che guadagni inviando, ed è sempre calcolato al momento (mai "congelato"): se spunti o togli una casella, il moltiplicatore cambia dalla prossima interazione in poi, coerente con la sua natura reversibile.
 };
 
 // Limite specifico sul LIKE INVIATO (non ricevuto): solo i primi N
@@ -62,6 +64,30 @@ const MULTIPLIERS = {
 // stesso principio del Wallet "Coming Soon": qui prepariamo il
 // meccanismo, il pagamento vero arriva con la fintech).
 const LIKE_SENDER_FREE_LIMIT = 10;
+
+/**
+ * Moltiplicatore per le 3 scelte facoltative in Impostazioni —
+ * calcolato SEMPRE al momento (mai salvato da nessuna parte), così
+ * riflette sempre lo stato vero e attuale delle spunte. Usata sia
+ * per i punti che una persona RICEVE sia per quelli che guadagna
+ * INVIANDO, guardando ogni volta le proprie scelte, non quelle di
+ * chi le manda o le riceve.
+ */
+async function getConsentMultiplier(userId, { db }) {
+  const user = await db.query(`
+    SELECT sponsored_missions_enabled, appears_in_historical_search, receive_roses_enabled
+    FROM users WHERE id = $1
+  `, [userId]);
+
+  if (!user) return 1;
+
+  const activeCount =
+    (user.sponsored_missions_enabled ? 1 : 0) +
+    (user.appears_in_historical_search ? 1 : 0) +
+    (user.receive_roses_enabled ? 1 : 0);
+
+  return 1 + (activeCount * MULTIPLIERS.consent_per_toggle);
+}
 
 /**
  * Calcola i punti da assegnare per un evento, applicando i
@@ -92,6 +118,9 @@ async function computePoints({ receiverId, source, senderId, arenaSessionId }, {
     `, [senderId, arenaSessionId]);
 
     if (senderStatus && senderStatus.is_top_connector) {
+      // La Rosa (qualunque tier) è sempre esente dal tetto: costa
+      // denaro reale ogni volta, quindi è già naturalmente limitata
+      // — nessun bisogno di un tetto artificiale in più.
       const isRosaSource = source.startsWith('rosa_');
 
       const alreadyBoostedThisReceiver = isRosaSource
@@ -101,6 +130,9 @@ async function computePoints({ receiverId, source, senderId, arenaSessionId }, {
       if (isRosaSource || !alreadyBoostedThisReceiver) {
         localPoints = Math.round(localPoints * MULTIPLIERS.top_connector_vote);
       }
+      // Se ha già "boostato" questa persona con lo stesso tipo di
+      // interazione in questa sessione, il valore resta quello base
+      // — niente errore, semplicemente niente bonus la seconda volta.
     }
   }
 
@@ -108,10 +140,20 @@ async function computePoints({ receiverId, source, senderId, arenaSessionId }, {
     localPoints = Math.round(localPoints * MULTIPLIERS.premium);
   }
 
+  // Bonus scelte facoltative — si applica per ultimo, sopra a tutti
+  // gli altri moltiplicatori, sempre calcolato sulle impostazioni
+  // ATTUALI di chi riceve.
+  const receiverConsentMultiplier = await getConsentMultiplier(receiverId, { db });
+  if (receiverConsentMultiplier !== 1) {
+    localPoints = Math.round(localPoints * receiverConsentMultiplier);
+  }
+
   const isFounder = await db.query(`
     SELECT 1 FROM founder_bracelets WHERE user_id = $1
   `, [receiverId]);
   if (isFounder) {
+    // Il bonus founder si applica SOLO all'accumulo globale, mai al
+    // locale — coerente con "si riparte tutti alla pari ogni sera".
     globalOnlyBonus = Math.round(base * (MULTIPLIERS.founder_global - 1));
   }
 
@@ -148,13 +190,20 @@ async function awardPoints({ receiverId, arenaSessionId, source, senderId }, { d
 }
 
 /**
- * Assegna al MITTENTE una quota fissa dei punti per l'interazione
- * che ha compiuto. Va chiamata SOLO se l'invio è ancora dentro i
- * limiti previsti (per il Like: il tetto dei primi 10 per Arena).
+ * Assegna al MITTENTE una quota (0.3x) dei punti che ha generato
+ * per il destinatario con la sua interazione. Va chiamata SOLO se
+ * l'invio è ancora dentro i limiti previsti (per il Like: il tetto
+ * dei primi 10 per Arena, verificato PRIMA di chiamare questa
+ * funzione — vedi isUnderSenderLikeLimit in interactions-logic).
  */
 async function awardSenderPoints({ senderId, arenaSessionId, source }, { db, io }) {
-  const senderPoints = SENDER_POINTS[source];
+  let senderPoints = SENDER_POINTS[source];
   if (!senderPoints || senderPoints <= 0) return { senderPoints: 0 };
+
+  const senderConsentMultiplier = await getConsentMultiplier(senderId, { db });
+  if (senderConsentMultiplier !== 1) {
+    senderPoints = Math.round(senderPoints * senderConsentMultiplier);
+  }
 
   await db.query(`
     INSERT INTO points_ledger (user_id, arena_session_id, points, source, counts_toward_local)
@@ -183,7 +232,10 @@ async function hasAlreadyBoosted({ senderId, receiverId, source, arenaSessionId 
     SELECT COUNT(*) FROM interactions
     WHERE sender_id = $1 AND receiver_id = $2 AND type = $3 AND arena_session_id = $4
   `, [senderId, receiverId, interactionType, arenaSessionId]);
+  // Nota: questa funzione va chiamata PRIMA di inserire la nuova
+  // riga in "interactions" — se la riga corrente fosse già stata
+  // scritta, il conteggio includerebbe anche lei per errore.
   return priorCount > 0;
 }
 
-module.exports = { BASE_POINTS, SENDER_POINTS, MULTIPLIERS, LIKE_SENDER_FREE_LIMIT, GUESS_GAME_BONUS_POINTS, MAX_DISTINCT_VIEWS_PER_SESSION, computePoints, awardPoints, awardSenderPoints };
+module.exports = { BASE_POINTS, SENDER_POINTS, MULTIPLIERS, LIKE_SENDER_FREE_LIMIT, GUESS_GAME_BONUS_POINTS, MAX_DISTINCT_VIEWS_PER_SESSION, computePoints, awardPoints, awardSenderPoints, getConsentMultiplier };
