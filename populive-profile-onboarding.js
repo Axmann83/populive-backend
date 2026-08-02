@@ -137,7 +137,7 @@ async function completeOnboarding({ userId, consentChoices }, { db }) {
     SET onboarding_completed = true,
         sponsored_missions_enabled = $1,
         appears_in_historical_search = $2,
-        receive_roses_enabled = $3,
+        receive_pulses_enabled = $3,
         contact_filter = $4,
         privacy_policy_version_accepted = $5,
         privacy_policy_accepted_at = now(),
@@ -147,7 +147,7 @@ async function completeOnboarding({ userId, consentChoices }, { db }) {
   `, [
     consentChoices.sponsoredMissionsEnabled ?? false,
     consentChoices.appearsInHistoricalSearch ?? true,
-    consentChoices.receiveRosesEnabled ?? true,
+    consentChoices.receivePulsesEnabled ?? true,
     consentChoices.contactFilter ?? 'everyone',
     consentChoices.privacyPolicyVersionAccepted,
     consentChoices.termsVersionAccepted,
@@ -162,7 +162,7 @@ async function completeOnboarding({ userId, consentChoices }, { db }) {
 // IL "CANCELLO": nessuna azione reale nell'app prima di questo
 // ------------------------------------------------------------
 // Questa funzione va chiamata all'inizio di OGNI operazione che
-// richiede un utente pienamente attivo (check-in, invio Rosa,
+// richiede un utente pienamente attivo (check-in, invio Pulse,
 // like, superlike...). Non modifica handleCheckin già scritto:
 // si inserisce PRIMA, come controllo di accesso.
 async function requireCompletedOnboarding(userId, { db }) {
