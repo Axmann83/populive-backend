@@ -126,7 +126,7 @@ async function initiatePulsePurchase({ senderId, receiverId, arenaSessionId, dri
   const priceCents = drink.base_price_cents - (drink.sponsor_discount_cents || 0);
 
   const sender = await db.query(`
-    SELECT is_test_account, free_pulses_balance FROM users WHERE id = $1
+    SELECT is_test_account, free_pulses_balance, paid_pulse_credits FROM users WHERE id = $1
   `, [senderId]);
 
   // CASO 1 — Account di prova: mai un addebito, punto. Pensato
@@ -148,6 +148,19 @@ async function initiatePulsePurchase({ senderId, receiverId, arenaSessionId, dri
       senderId, receiverId, arenaSessionId,
       drinkName: drink.name, priceCents, tier,
       paymentStatus: 'free',
+    }, { db, redis, io });
+    return { ...result, freeOrTest: true };
+  }
+
+  // CASO 2b — Crediti Pulse pre-pagati disponibili (comprati in
+  // pacchetto, mai a scadenza): li consumiamo prima di chiedere un
+  // nuovo pagamento — il denaro è già stato incassato in anticipo.
+  if (sender?.paid_pulse_credits > 0) {
+    await db.query(`UPDATE users SET paid_pulse_credits = paid_pulse_credits - 1 WHERE id = $1`, [senderId]);
+    const result = await createPulseRecord({
+      senderId, receiverId, arenaSessionId,
+      drinkName: drink.name, priceCents, tier,
+      paymentStatus: 'prepaid',
     }, { db, redis, io });
     return { ...result, freeOrTest: true };
   }
