@@ -52,6 +52,7 @@ const MULTIPLIERS = {
   sender_share:   0.3,   // chi INVIA un'interazione riceve il 30% del punteggio corrispondente
   top_connector_vote: 1.5, // il voto di un Top Connector vale 1.5x — solo la prima volta per persona per like/superlike, sempre per la Rosa (già limitata dal costo reale)
   consent_per_toggle: 0.05, // +5% per ciascuna delle 3 scelte facoltative attive in Impostazioni (missioni sponsorizzate/bacheca storica/ricevi Rose) — cumulabile fino a +15% con tutte e tre attive. Si applica SIA ai punti che ricevi SIA a quelli che guadagni inviando, ed è sempre calcolato al momento (mai "congelato"): se spunti o togli una casella, il moltiplicatore cambia dalla prossima interazione in poi, coerente con la sua natura reversibile.
+  verified_bonus: 0.05, // +5% per chi ha il profilo Verificato — a differenza delle 3 scelte sopra, questo NON si accende/spegne mai (badge acquistato una volta), quindi si SOMMA in modo semplice sopra gli altri invece di moltiplicarsi insieme — su 10 punti base: 15% (tutte e 3 le scelte) + 5% (verificato) = 2 punti bonus totali, non 2,075. Vale meno proprio perché non è reversibile come le altre.
 };
 
 // Limite specifico sul LIKE INVIATO (non ricevuto): solo i primi N
@@ -75,7 +76,7 @@ const LIKE_SENDER_FREE_LIMIT = 10;
  */
 async function getConsentMultiplier(userId, { db }) {
   const user = await db.query(`
-    SELECT sponsored_missions_enabled, appears_in_historical_search, receive_roses_enabled
+    SELECT sponsored_missions_enabled, appears_in_historical_search, receive_roses_enabled, is_verified
     FROM users WHERE id = $1
   `, [userId]);
 
@@ -86,7 +87,12 @@ async function getConsentMultiplier(userId, { db }) {
     (user.appears_in_historical_search ? 1 : 0) +
     (user.receive_roses_enabled ? 1 : 0);
 
-  return 1 + (activeCount * MULTIPLIERS.consent_per_toggle);
+  // Somma semplice, non composta — il bonus Verificato si aggiunge
+  // "sopra" quello delle 3 scelte, non si moltiplica insieme (v.
+  // spiegazione sopra su MULTIPLIERS.verified_bonus).
+  const verifiedBonus = user.is_verified ? MULTIPLIERS.verified_bonus : 0;
+
+  return 1 + (activeCount * MULTIPLIERS.consent_per_toggle) + verifiedBonus;
 }
 
 /**
