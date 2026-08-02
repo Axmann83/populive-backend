@@ -51,11 +51,10 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type }, {
     await db.query(`UPDATE users SET superlike_balance = superlike_balance - 1 WHERE id = $1`, [senderId]);
   }
 
-  // Rate limit giornaliero LATO RICEVENTE: solo i primi N like
-  // generano punti a chi li riceve (l'invio resta comunque libero).
-  const countsForPoints = type === 'superlike'
-    ? true
-    : await isUnderDailyLikeLimit(receiverId, { db });
+  // Chi RICEVE un Like guadagna sempre punti, senza tetto — il
+  // limite esiste solo lato mittente (isUnderSenderLikeLimit più
+  // sotto), mai per chi lo riceve.
+  const countsForPoints = true;
 
   // IMPORTANTE: calcoliamo i punti (che internamente controlla se
   // questo Connector ha già "boostato" questa persona) PRIMA di
@@ -196,16 +195,6 @@ async function respondToSuperlike({ interactionId, receiverId, action }, { db, i
   }
 
   return { success: false, reason: 'invalid_action' };
-}
-
-async function isUnderDailyLikeLimit(receiverId, { db }) {
-  const DAILY_LIKE_LIMIT = 5; // valore già deciso, tenuto qui per ora
-  const count = await db.query(`
-    SELECT COUNT(*) FROM interactions
-    WHERE receiver_id = $1 AND type = 'like' AND counts_for_points = true
-      AND created_at >= current_business_day_start($1)
-  `, [receiverId]);
-  return count < DAILY_LIKE_LIMIT;
 }
 
 // Tetto lato MITTENTE: solo i primi LIKE_SENDER_FREE_LIMIT like
