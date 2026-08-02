@@ -305,9 +305,17 @@ async function applyPurchaseEffect({ userId, productId, arenaSessionId, external
       break;
 
     case 'pulse_bundle':
-      // Esempio di estensione futura: accredita Pulse pre-pagate
-      // da spendere più avanti. Struttura pronta, da collegare
-      // quando il prodotto sarà definito nel dettaglio.
+      // Un credito = una consumazione generica, il valore vero è
+      // deciso a monte con ogni locale — nessun controllo di prezzo
+      // qui: se qualcuno prova a chiedere un drink chiaramente fuori
+      // scala (es. un flûte di Dom Pérignon), è il BARTENDER a
+      // rifiutare guardando la consumazione richiesta sull'app,
+      // esattamente come già succede per il riscatto stesso. Mai una
+      // scadenza: restano validi finché non li usi, in qualunque
+      // locale partner presente e futuro.
+      await db.query(`
+        UPDATE users SET paid_pulse_credits = paid_pulse_credits + $1 WHERE id = $2
+      `, [config.credits, userId]);
       break;
 
     default:
@@ -691,4 +699,23 @@ async function getReceivedPulses({ userId }, { db }) {
   }));
 }
 
-module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createPulseRecord, respondToPulse, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedPulses };
+/**
+ * Saldo Pulse disponibili per l'invio — separato tra quelli
+ * gratuiti settimanali e quelli pre-pagati (comprati in pacchetto,
+ * mai a scadenza), così il frontend può mostrarli distinti se serve
+ * ma anche il totale utilizzabile subito.
+ */
+async function getPulseBalance({ userId }, { db }) {
+  const user = await db.query(`
+    SELECT free_pulses_balance, paid_pulse_credits FROM users WHERE id = $1
+  `, [userId]);
+  if (!user) return { success: false, reason: 'user_not_found' };
+
+  return {
+    success: true,
+    freeBalance: user.free_pulses_balance || 0,
+    paidCredits: user.paid_pulse_credits || 0,
+  };
+}
+
+module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createPulseRecord, respondToPulse, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedPulses, getPulseBalance };
