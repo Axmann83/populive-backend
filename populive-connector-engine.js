@@ -99,7 +99,7 @@ async function joinSquad({ connectorId, memberId, arenaSessionId, tableQrCode, w
 
 /**
  * Va chiamata OGNI VOLTA che un membro di una squad guadagna punti
- * (like/superlike/rosa ricevuti, spesa) — riflette una quota al
+ * (like/superlike/pulse ricevuti, spesa) — riflette una quota al
  * Connector della sua squad, se ne ha una per questa sessione.
  */
 async function reflectPointsToConnector({ memberId, arenaSessionId, memberPointsEarned }, { db, io }) {
@@ -135,7 +135,7 @@ async function reflectPointsToConnector({ memberId, arenaSessionId, memberPoints
 // ------------------------------------------------------------
 /**
  * Chiamata quando un utente con status Connector (per questa
- * sessione) invia un like/Rosa a qualcuno — piazza il "marker".
+ * sessione) invia un like/Pulse a qualcuno — piazza il "marker".
  * La valutazione vera avviene più tardi, nel job schedulato.
  */
 async function placeDiscoveryMarker({ connectorId, discoveredUserId, arenaSessionId }, { db }) {
