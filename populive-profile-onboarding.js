@@ -188,11 +188,23 @@ async function requireCompletedOnboarding(userId, { db }) {
  */
 async function getPublicProfile({ userId, arenaSessionId }, { db }) {
   const profile = await db.query(`
-    SELECT display_name, photo_url, avatar_emoji, bio, instant_influencer_category
+    SELECT display_name, photo_url, avatar_emoji, bio, instant_influencer_category,
+           is_premium, premium_expires_at, is_verified
     FROM users WHERE id = $1
   `, [userId]);
 
   if (!profile) return { success: false, reason: 'user_not_found' };
+
+  // Verifica in corso — se c'è una richiesta ancora "pending", il
+  // frontend deve poterlo sapere per mostrare "in revisione" invece
+  // di riproporre il bottone d'acquisto.
+  let verificationPending = false;
+  if (!profile.is_verified) {
+    const pendingRow = await db.query(`
+      SELECT 1 FROM verification_requests WHERE user_id = $1 AND status = 'pending'
+    `, [userId]);
+    verificationPending = !!pendingRow;
+  }
 
   const hashtagRows = await db.queryAll(`
     SELECT h.name FROM hashtags h
@@ -237,6 +249,10 @@ async function getPublicProfile({ userId, arenaSessionId }, { db }) {
       displayName: profile.display_name,
       photoUrl: profile.photo_url,
       avatarEmoji: profile.avatar_emoji || '🙂',
+      isPremium: profile.is_premium || false,
+      premiumExpiresAt: profile.premium_expires_at || null,
+      isVerified: profile.is_verified || false,
+      verificationPending,
       bio: profile.bio,
       hashtags: hashtagRows.map((h) => h.name),
       isTopConnector,
