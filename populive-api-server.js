@@ -20,7 +20,7 @@ const Redis = require('ioredis');
 const { setupWebSocket } = require('./populive-websocket-rooms');
 const { handleCheckin } = require('./populive-checkin-logic');
 const {
-  sendInteraction, trackProfileView, respondToPulse, attemptGuess, respondToSuperlike, getReceivedPulses,
+  sendInteraction, trackProfileView, respondToPulse, attemptGuess, respondToSuperlike, getReceivedPulses, getPulseBalance,
 } = require('./populive-interactions-logic');
 const { initiatePulsePurchase, initiatePurchase, handleStripeWebhook } = require('./populive-payments-logic');
 const { sendMessage, getMessages, setChatKeepPreference } = require('./populive-chat-logic');
@@ -224,6 +224,11 @@ app.post('/api/profile-views', requireOnboarded, ah(async (req, res) => {
 // ------------------------------------------------------------
 // PULSE
 // ------------------------------------------------------------
+app.get('/api/users/:userId/pulse-balance', requireOnboarded, ah(async (req, res) => {
+  const result = await getPulseBalance({ userId: req.userId }, { db });
+  res.json(result);
+}));
+
 app.get('/api/users/:userId/pulses', requireOnboarded, ah(async (req, res) => {
   // Le Pulse ricevute sono dati privati (mittente, drink scelto) —
   // SOLO il proprietario può vederle, mai un ID scritto a mano
