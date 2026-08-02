@@ -2,6 +2,14 @@
  * ============================================================
  * POPULIVE — LETTURA CLASSIFICHE (locale e globale)
  * ============================================================
+ * Finora avevamo scritto solo la logica che GENERA punti
+ * (points_ledger). Qui li leggiamo aggregati, in due modi:
+ *   - Locale: somma filtrata per una singola arena_session
+ *   - Globale: somma di TUTTA la storia di un utente
+ * Nessuna tabella "classifica" separata da mantenere sincronizzata:
+ * entrambe le viste derivano dalla stessa tabella points_ledger,
+ * quindi non possono mai andare "fuori sincrono" tra loro.
+ * ============================================================
  */
 
 async function getLocalRanking({ arenaSessionId }, { db }) {
@@ -69,12 +77,25 @@ async function getGlobalRanking({ limit = 100 }, { db }) {
   }));
 }
 
+/**
+ * Posizione e punti di UN utente specifico — utile per mostrare
+ * "tu sei #4" senza dover scaricare tutta la classifica quando
+ * serve solo il proprio piazzamento (es. nella scheda profilo).
+ * Usa query mirate (non scansiona l'intera classifica), quindi
+ * resta veloce anche con centinaia di migliaia di utenti.
+ */
 async function getUserRankingSummary({ userId, arenaSessionId, viewerId }, { db }) {
+  // Foto e nome servono sempre, a prescindere dal toggle di
+  // autopresentazione (quello riguarda solo i NUMERI di classifica,
+  // non l'identità visiva del profilo).
   const profile = await db.query(`SELECT display_name, photo_url, avatar_emoji FROM users WHERE id = $1`, [userId]);
   const displayName = profile?.display_name || null;
   const photoUrl = profile?.photo_url || null;
   const avatarEmoji = profile?.avatar_emoji || '🙂';
 
+  // Se chi guarda non è il proprietario del profilo, rispettiamo la
+  // sua scelta di autopresentazione — se ha disattivato la visibilità,
+  // restituiamo un risultato "nascosto" invece dei numeri veri.
   if (viewerId && viewerId !== userId) {
     const prefs = await db.query(`SELECT show_ranking_on_profile FROM users WHERE id = $1`, [userId]);
     if (prefs && prefs.show_ranking_on_profile === false) {
@@ -82,6 +103,11 @@ async function getUserRankingSummary({ userId, arenaSessionId, viewerId }, { db 
     }
   }
 
+  // Se non c'è ancora una sessione Arena (utente non ha fatto
+  // check-in stasera), non ha senso interrogare la classifica
+  // locale — passare una stringa vuota a una colonna UUID
+  // manderebbe il database in errore. Saltiamo direttamente ai
+  // dati globali, che esistono sempre.
   const hasValidSession = arenaSessionId && arenaSessionId.length > 0;
 
   let localPoints = 0;
@@ -132,6 +158,15 @@ async function getUserRankingSummary({ userId, arenaSessionId, viewerId }, { db 
   };
 }
 
+/**
+ * ============================================================
+ * "BENTORNATO" — cosa è successo da quando la persona non
+ * guardava l'app. Confronta lo stato attuale con l'ultima visita
+ * registrata (users.last_seen_at), poi AGGIORNA quel timestamp a
+ * ora — così la prossima volta il confronto riparte da qui, non
+ * si accumula all'infinito.
+ * ============================================================
+ */
 async function getWelcomeBackSummary({ userId }, { db }) {
   const user = await db.query(`SELECT last_seen_at FROM users WHERE id = $1`, [userId]);
   if (!user) return { success: false, reason: 'user_not_found' };
@@ -154,14 +189,17 @@ async function getWelcomeBackSummary({ userId }, { db }) {
     WHERE receiver_id = $1 AND type = 'superlike' AND created_at > $2
   `, [userId, since]);
 
-  const newRoses = await db.query(`
-    SELECT COUNT(*) FROM roses
+  const newPulses = await db.query(`
+    SELECT COUNT(*) FROM pulses
     WHERE receiver_id = $1 AND created_at > $2
   `, [userId, since]);
 
+  // Aggiorniamo ORA, non prima di aver letto tutto — altrimenti il
+  // confronto sopra userebbe già il nuovo timestamp invece di quello
+  // vero dell'ultima visita.
   await db.query(`UPDATE users SET last_seen_at = now() WHERE id = $1`, [userId]);
 
-  const hasNews = pointsEarned > 0 || newLikes > 0 || newSuperlikes > 0 || newRoses > 0;
+  const hasNews = pointsEarned > 0 || newLikes > 0 || newSuperlikes > 0 || newPulses > 0;
 
   return {
     success: true,
@@ -169,7 +207,7 @@ async function getWelcomeBackSummary({ userId }, { db }) {
     pointsEarned,
     newLikes: parseInt(newLikes) || 0,
     newSuperlikes: parseInt(newSuperlikes) || 0,
-    newRoses: parseInt(newRoses) || 0,
+    newPulses: parseInt(newPulses) || 0,
   };
 }
 
