@@ -16,9 +16,9 @@ const BASE_POINTS = {
   profile_view:              2,   // solo la prima visita per coppia visitatore/visitato/serata, e solo le prime N persone diverse viste a testa (v. MAX_DISTINCT_VIEWS_PER_SESSION)
   like_received:             5,   // solo i primi N like/giorno per ricevente contano (rate limit già deciso)
   superlike_received:        8,
-  rosa_standalone:          10,
-  rosa_like:                10,   // + bonus separato al DESTINATARIO se vince il minigioco (vedi GUESS_GAME_BONUS_POINTS)
-  rosa_super:               12,
+  pulse_standalone:          10,
+  pulse_like:                10,   // + bonus separato al DESTINATARIO se vince il minigioco (vedi GUESS_GAME_BONUS_POINTS)
+  pulse_super:               12,
   mission_completed:        15,   // missione sponsorizzata da brand
   connector_discovery_bonus: 18,  // Top Connector: bonus per aver "scoperto" un profilo che poi esplode
 };
@@ -30,13 +30,13 @@ const SENDER_POINTS = {
   profile_view:        1,
   like_received:       2,
   superlike_received:  3,
-  rosa_standalone:     4,
-  rosa_like:           4,
-  rosa_super:          5,
+  pulse_standalone:     4,
+  pulse_like:           4,
+  pulse_super:          5,
 };
 
-// Bonus al DESTINATARIO se vince il minigioco Rosa+Like (è lui/lei
-// che gioca, quindi il bonus va a lui/lei, non a chi ha mandato la Rosa).
+// Bonus al DESTINATARIO se vince il minigioco Pulse+Like (è lui/lei
+// che gioca, quindi il bonus va a lui/lei, non a chi ha mandato la Pulse).
 const GUESS_GAME_BONUS_POINTS = 8;
 
 // Tetto anti-spam sulle visite profilo: oltre le prime N persone
@@ -50,8 +50,8 @@ const MULTIPLIERS = {
   premium:        1.2,   // profilo Premium a pagamento
   founder_global: 1.5,   // braccialetto founder — SOLO sul globale, mai sul locale (già deciso)
   sender_share:   0.3,   // chi INVIA un'interazione riceve il 30% del punteggio corrispondente
-  top_connector_vote: 1.5, // il voto di un Top Connector vale 1.5x — solo la prima volta per persona per like/superlike, sempre per la Rosa (già limitata dal costo reale)
-  consent_per_toggle: 0.05, // +5% per ciascuna delle 3 scelte facoltative attive in Impostazioni (missioni sponsorizzate/bacheca storica/ricevi Rose) — cumulabile fino a +15% con tutte e tre attive. Si applica SIA ai punti che ricevi SIA a quelli che guadagni inviando, ed è sempre calcolato al momento (mai "congelato"): se spunti o togli una casella, il moltiplicatore cambia dalla prossima interazione in poi, coerente con la sua natura reversibile.
+  top_connector_vote: 1.5, // il voto di un Top Connector vale 1.5x — solo la prima volta per persona per like/superlike, sempre per la Pulse (già limitata dal costo reale)
+  consent_per_toggle: 0.05, // +5% per ciascuna delle 3 scelte facoltative attive in Impostazioni (missioni sponsorizzate/bacheca storica/ricevi Pulse) — cumulabile fino a +15% con tutte e tre attive. Si applica SIA ai punti che ricevi SIA a quelli che guadagni inviando, ed è sempre calcolato al momento (mai "congelato"): se spunti o togli una casella, il moltiplicatore cambia dalla prossima interazione in poi, coerente con la sua natura reversibile.
   verified_bonus: 0.05, // +5% per chi ha il profilo Verificato — a differenza delle 3 scelte sopra, questo NON si accende/spegne mai (badge acquistato una volta), quindi si SOMMA in modo semplice sopra gli altri invece di moltiplicarsi insieme — su 10 punti base: 15% (tutte e 3 le scelte) + 5% (verificato) = 2 punti bonus totali, non 2,075. Vale meno proprio perché non è reversibile come le altre.
 };
 
@@ -76,7 +76,7 @@ const LIKE_SENDER_FREE_LIMIT = 10;
  */
 async function getConsentMultiplier(userId, { db }) {
   const user = await db.query(`
-    SELECT sponsored_missions_enabled, appears_in_historical_search, receive_roses_enabled, is_verified
+    SELECT sponsored_missions_enabled, appears_in_historical_search, receive_pulses_enabled, is_verified
     FROM users WHERE id = $1
   `, [userId]);
 
@@ -85,7 +85,7 @@ async function getConsentMultiplier(userId, { db }) {
   const activeCount =
     (user.sponsored_missions_enabled ? 1 : 0) +
     (user.appears_in_historical_search ? 1 : 0) +
-    (user.receive_roses_enabled ? 1 : 0);
+    (user.receive_pulses_enabled ? 1 : 0);
 
   // Somma semplice, non composta — il bonus Verificato si aggiunge
   // "sopra" quello delle 3 scelte, non si moltiplica insieme (v.
@@ -124,16 +124,16 @@ async function computePoints({ receiverId, source, senderId, arenaSessionId }, {
     `, [senderId, arenaSessionId]);
 
     if (senderStatus && senderStatus.is_top_connector) {
-      // La Rosa (qualunque tier) è sempre esente dal tetto: costa
+      // La Pulse (qualunque tier) è sempre esente dal tetto: costa
       // denaro reale ogni volta, quindi è già naturalmente limitata
       // — nessun bisogno di un tetto artificiale in più.
-      const isRosaSource = source.startsWith('rosa_');
+      const isPulseSource = source.startsWith('pulse_');
 
-      const alreadyBoostedThisReceiver = isRosaSource
+      const alreadyBoostedThisReceiver = isPulseSource
         ? false
         : await hasAlreadyBoosted({ senderId, receiverId, source, arenaSessionId }, { db });
 
-      if (isRosaSource || !alreadyBoostedThisReceiver) {
+      if (isPulseSource || !alreadyBoostedThisReceiver) {
         localPoints = Math.round(localPoints * MULTIPLIERS.top_connector_vote);
       }
       // Se ha già "boostato" questa persona con lo stesso tipo di
