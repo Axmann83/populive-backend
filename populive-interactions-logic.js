@@ -1,6 +1,12 @@
 /**
  * ============================================================
- * POPULIVE — INVIO INTERAZIONI E RISPOSTA ALLE ROSE
+ * POPULIVE — INVIO INTERAZIONI E RISPOSTA AI PULSE
+ * ============================================================
+ * Due famiglie di funzioni:
+ *   1) Invio: chi manda un Like/Superlike/Pulse (con controllo
+ *      del filtro contatti del destinatario)
+ *   2) Risposta: chi riceve una Pulse decide cosa fare
+ *      (accetta / rifiuta / ignora / mini-gioco per la variante +Like)
  * ============================================================
  */
 
@@ -8,6 +14,9 @@ const { awardPoints, awardSenderPoints, LIKE_SENDER_FREE_LIMIT, GUESS_GAME_BONUS
 const { openChatConversation } = require('./populive-chat-logic');
 
 
+// ------------------------------------------------------------
+// PARTE 0 — Like / Superlike semplici (senza Pulse allegata)
+// ------------------------------------------------------------
 async function sendInteraction({ senderId, receiverId, arenaSessionId, type }, { db, io, redis }) {
   // type: 'like' | 'superlike'
 
@@ -30,6 +39,11 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type }, {
     const check = await canSendDirectContact({ senderId, receiverId }, { db });
     if (!check.allowed) return { success: false, reason: check.reason };
 
+    // Il Superlike ora è un vero SALDO da spendere (non solo un
+    // tetto oltre il quale perdi il bonus, come il Like) — se è a
+    // zero, l'invio si blocca del tutto: il frontend mostra "Superlike
+    // esauriti, vuoi acquistarne altri?" invece di lasciarlo passare
+    // senza punti.
     const sender = await db.query(`SELECT superlike_balance FROM users WHERE id = $1`, [senderId]);
     if (!sender || sender.superlike_balance <= 0) {
       return { success: false, reason: 'superlike_balance_exhausted' };
@@ -37,10 +51,16 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type }, {
     await db.query(`UPDATE users SET superlike_balance = superlike_balance - 1 WHERE id = $1`, [senderId]);
   }
 
+  // Rate limit giornaliero LATO RICEVENTE: solo i primi N like
+  // generano punti a chi li riceve (l'invio resta comunque libero).
   const countsForPoints = type === 'superlike'
     ? true
     : await isUnderDailyLikeLimit(receiverId, { db });
 
+  // IMPORTANTE: calcoliamo i punti (che internamente controlla se
+  // questo Connector ha già "boostato" questa persona) PRIMA di
+  // scrivere la riga dell'interazione corrente — altrimenti il
+  // controllo vedrebbe sempre "già presente" anche al primo invio.
   let receiverLocalPoints = 0;
   if (countsForPoints) {
     const result = await awardPoints({
@@ -57,9 +77,19 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type }, {
     VALUES ($1, $2, $3, $4, $5)
   `, [senderId, receiverId, arenaSessionId, type, countsForPoints]);
 
+  // Punti al MITTENTE: sia per Superlike che per Like, solo dentro
+  // un tetto gratuito — per il Like è per-Arena, per il Superlike è
+  // SETTIMANALE (dato che il Superlike, mostrando sempre l'identità,
+  // è un gesto più "pesante" — un tetto a settimana invece che a
+  // singola serata ha più senso). Oltre il tetto, l'invio resta
+  // comunque libero, semplicemente non genera più punti extra per
+  // chi lo manda, a meno di crediti acquistati.
   let senderEarnedPoints = false;
   if (countsForPoints) {
     if (type === 'superlike') {
+      // Nessun controllo di tetto qui: il saldo è già stato
+      // verificato e scalato più sopra, prima ancora di scrivere
+      // l'interazione — se siamo arrivati fin qui, il punto spetta.
       await awardSenderPoints({
         senderId, arenaSessionId, source: 'superlike_received',
       }, { db, io });
@@ -72,11 +102,22 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type }, {
         }, { db, io });
         senderEarnedPoints = true;
       } else if (justReachedLimit) {
+        // Il primo like che supera il tetto — un avviso, una volta
+        // sola, non ripetuto per ogni like successivo mentre si
+        // resta sopra il limite (sarebbe fastidioso).
         io.to(`user_${senderId}`).emit('like_limit_reached', {});
       }
+      // Oltre il tetto: il like parte comunque (nessun blocco),
+      // semplicemente non genera punti extra al mittente — a meno
+      // che non abbia acquistato crediti extra (vedi purchaseLikeCredits).
     }
   }
 
+  // Notifica PRIVATA — mai alla stanza dell'Arena. Il Like resta
+  // anonimo nel payload (nessun senderId), il Superlike mostra
+  // il mittente perché è la sua natura fin dall'inizio. Includiamo
+  // anche i punti veri guadagnati, per il popup che li mostra
+  // ovunque ci si trovi nell'app.
   io.to(`user_${receiverId}`).emit(type === 'superlike' ? 'superlike_received' : 'like_received', {
     senderId: type === 'superlike' ? senderId : null,
     senderName: type === 'superlike' ? await getSenderName(senderId, { db }) : null,
@@ -84,6 +125,10 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type }, {
     points: receiverLocalPoints,
   });
 
+  // RECIPROCITÀ (solo per il Like anonimo): se il destinatario ci
+  // aveva GIÀ messo like in precedenza, scatta il match — l'identità
+  // si svela a entrambi e si apre la chat, con la stessa protezione
+  // bilaterale "conserva/cancella" di tutte le altre chat.
   let reciprocalMatch = false;
   let matchConversationId = null;
   if (type === 'like') {
@@ -107,6 +152,11 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type }, {
   return { success: true, countedForPoints: countsForPoints, senderEarnedPoints, reciprocalMatch, matchConversationId };
 }
 
+/**
+ * Risposta a un Superlike semplice (senza Pulse allegata) — stessa
+ * logica di accetta/rifiuta/lascia-in-sospeso già decisa per la
+ * Pulse, mai implementata finora per il Superlike puro.
+ */
 async function respondToSuperlike({ interactionId, receiverId, action }, { db, io }) {
   const interaction = await db.query(`SELECT * FROM interactions WHERE id = $1`, [interactionId]);
   if (!interaction || interaction.receiver_id !== receiverId || interaction.type !== 'superlike') {
@@ -149,7 +199,7 @@ async function respondToSuperlike({ interactionId, receiverId, action }, { db, i
 }
 
 async function isUnderDailyLikeLimit(receiverId, { db }) {
-  const DAILY_LIKE_LIMIT = 5;
+  const DAILY_LIKE_LIMIT = 5; // valore già deciso, tenuto qui per ora
   const count = await db.query(`
     SELECT COUNT(*) FROM interactions
     WHERE receiver_id = $1 AND type = 'like' AND counts_for_points = true
@@ -158,6 +208,9 @@ async function isUnderDailyLikeLimit(receiverId, { db }) {
   return count < DAILY_LIKE_LIMIT;
 }
 
+// Tetto lato MITTENTE: solo i primi LIKE_SENDER_FREE_LIMIT like
+// inviati in questa Arena generano punti a chi li manda. Conta
+// anche eventuali crediti extra acquistati (fase fintech successiva).
 async function isUnderSenderLikeLimit(senderId, arenaSessionId, { db }) {
   const sentCount = await db.query(`
     SELECT COUNT(*) FROM points_ledger
@@ -169,10 +222,15 @@ async function isUnderSenderLikeLimit(senderId, arenaSessionId, { db }) {
 
   return {
     underLimit: sentCount < threshold,
+    // true SOLO per il primo invio che supera il tetto — serve per
+    // avvisare una volta sola, non ripetutamente ad ogni like
+    // successivo mentre si resta sopra il limite.
     justReachedLimit: sentCount === threshold,
   };
 }
 
+// Placeholder per la fase fintech: qui si collegherà l'acquisto
+// reale in-app di crediti Like extra. Per ora ritorna sempre 0.
 async function getPurchasedLikeCredits(senderId, arenaSessionId, { db }) {
   const result = await db.query(`
     SELECT COALESCE(SUM((effect_config->>'credits')::int), 0) AS total
@@ -189,6 +247,17 @@ async function getPurchasedLikeCredits(senderId, arenaSessionId, { db }) {
 }
 
 
+/**
+ * ============================================================
+ * MOTORE ACQUISTI — applica l'effetto di QUALUNQUE prodotto del
+ * catalogo, senza bisogno di scrivere una funzione nuova ogni
+ * volta che aggiungiamo un prodotto. Studiando il mercato potremo
+ * aggiungere nuovi SKU (es. "boost visibilità 1 ora", "pacchetto
+ * Pulse scontate") inserendo solo una riga in iap_products — questa
+ * funzione va estesa SOLO se introduciamo un product_type
+ * concettualmente nuovo, non per ogni singolo nuovo prodotto.
+ * ============================================================
+ */
 async function applyPurchaseEffect({ userId, productId, arenaSessionId, externalTransactionId }, { db }) {
   const product = await db.query(`SELECT * FROM iap_products WHERE id = $1 AND is_active = true`, [productId]);
   if (!product) return { success: false, reason: 'product_not_found_or_inactive' };
@@ -198,9 +267,18 @@ async function applyPurchaseEffect({ userId, productId, arenaSessionId, external
 
   switch (product.product_type) {
     case 'like_credits':
+      // Non serve fare nulla qui subito: getPurchasedLikeCredits
+      // legge direttamente user_purchases al momento del bisogno.
       break;
 
     case 'superlike_credits':
+      // A differenza del like_credits (letto al bisogno), qui il
+      // Superlike è un vero saldo — l'acquisto lo ricarica subito.
+      // IMPORTANTE: qui NESSUN tetto — il tetto di 10 vale solo per
+      // l'accumulo GRATUITO settimanale (per non lasciarlo crescere
+      // all'infinito se non lo usi); comprare è denaro vero, nessun
+      // motivo di limitare quanti pacchetti qualcuno voglia prendere
+      // in una singola serata.
       await db.query(`
         UPDATE users SET superlike_balance = superlike_balance + $1 WHERE id = $2
       `, [config.credits, userId]);
@@ -215,6 +293,8 @@ async function applyPurchaseEffect({ userId, productId, arenaSessionId, external
 
     case 'verified_badge':
       if (config.requires_manual_review) {
+        // Non attiviamo subito is_verified: entra in coda di
+        // revisione manuale (protezione anti-finti-VIP già decisa).
         await db.query(`
           INSERT INTO verification_requests (user_id, purchase_id, status)
           VALUES ($1, NULL, 'pending')
@@ -224,7 +304,10 @@ async function applyPurchaseEffect({ userId, productId, arenaSessionId, external
       }
       break;
 
-    case 'rosa_bundle':
+    case 'pulse_bundle':
+      // Esempio di estensione futura: accredita Pulse pre-pagate
+      // da spendere più avanti. Struttura pronta, da collegare
+      // quando il prodotto sarà definito nel dettaglio.
       break;
 
     default:
@@ -240,14 +323,20 @@ async function applyPurchaseEffect({ userId, productId, arenaSessionId, external
 }
 
 
+// ------------------------------------------------------------
+// VISITE AL PROFILO
+// ------------------------------------------------------------
 async function trackProfileView({ viewerId, viewedUserId, arenaSessionId }, { db, io }) {
-  if (viewerId === viewedUserId) return { success: true, skipped: true };
+  if (viewerId === viewedUserId) return { success: true, skipped: true }; // non contano le proprie
 
   const blocked = await db.query(`
     SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2
   `, [viewedUserId, viewerId]);
   if (blocked) return { success: false, reason: 'blocked_by_viewed_user' };
 
+  // Anti-abuso: una sola visita "che conta" per coppia viewer→viewed
+  // per Arena — altrimenti basterebbe aprire e chiudere lo stesso
+  // profilo cento volte per generare punti a raffica.
   const alreadyCounted = await db.query(`
     SELECT 1 FROM profile_views
     WHERE viewer_id = $1 AND viewed_user_id = $2 AND arena_session_id = $3
@@ -260,8 +349,16 @@ async function trackProfileView({ viewerId, viewedUserId, arenaSessionId }, { db
     VALUES ($1, $2, $3)
   `, [viewerId, viewedUserId, arenaSessionId]);
 
+  // Il destinatario (chi viene visto) riceve sempre il suo punto —
+  // ogni visita a lui è comunque un segnale genuino, nessun rischio
+  // di spam dal SUO lato.
   await awardPoints({ receiverId: viewedUserId, arenaSessionId, source: 'profile_view' }, { db, io });
 
+  // Il VISITATORE invece riceve il proprio piccolo incentivo solo
+  // per le prime N persone DIVERSE viste in questa sessione — oltre
+  // quel tetto, può continuare a guardare profili liberamente, ma
+  // senza più guadagnare punti lui stesso (altrimenti basterebbe
+  // scorrere il radar all'infinito per punti gratis).
   const distinctViewsCount = await db.query(`
     SELECT COUNT(DISTINCT viewed_user_id) AS total FROM profile_views
     WHERE viewer_id = $1 AND arena_session_id = $2
@@ -271,11 +368,16 @@ async function trackProfileView({ viewerId, viewedUserId, arenaSessionId }, { db
     await awardSenderPoints({ senderId: viewerId, arenaSessionId, source: 'profile_view' }, { db, io });
   }
 
+  // Notifica privata, leggera: non svela chi ha guardato (coerente
+  // con l'anonimato generale del radar), solo che "qualcuno" l'ha fatto.
   io.to(`user_${viewedUserId}`).emit('profile_viewed', { countedForPoints: true });
 
   return { success: true, alreadyCounted: false };
 }
-
+// Questa funzione va chiamata PRIMA di creare un Superlike o una
+// Pulse+Superlike (mai per il Like semplice o la Pulse standalone/
+// +Like, che restano anonime e quindi non sono "un contatto" da
+// filtrare).
 async function canSendDirectContact({ senderId, receiverId }, { db }) {
   const receiver = await db.query(`
     SELECT contact_filter FROM users WHERE id = $1
@@ -297,30 +399,49 @@ async function canSendDirectContact({ senderId, receiverId }, { db }) {
 }
 
 
-async function createRosaRecord({ senderId, receiverId, arenaSessionId, drinkName, priceCents, tier, paymentStatus, stripeCheckoutSessionId }, { db, redis, io }) {
+// ------------------------------------------------------------
+// PARTE 1b — Creazione VERA della Pulse nel database. Volutamente
+// separata dall'invio: questa funzione presuppone che il pagamento
+// sia GIÀ risolto (gratis, account di prova, o confermato da Stripe)
+// — non fa mai controlli sui soldi, solo sulla logica del prodotto.
+// Chiamata da initiatePulsePurchase (per il caso gratis/test, subito)
+// e dal webhook Stripe (per il caso pagato, solo a conferma avvenuta).
+// ------------------------------------------------------------
+async function createPulseRecord({ senderId, receiverId, arenaSessionId, drinkName, priceCents, tier, paymentStatus, stripeCheckoutSessionId }, { db, redis, io }) {
 
   let guessesRemaining = null;
   if (tier === 'like') {
     guessesRemaining = await computeGuessAllowance(arenaSessionId, { redis });
   }
 
-  const rosa = await db.query(`
-    INSERT INTO roses (sender_id, receiver_id, arena_session_id, drink_type,
+  const pulse = await db.query(`
+    INSERT INTO pulses (sender_id, receiver_id, arena_session_id, drink_type,
                         price_cents, tier, guesses_remaining, payment_status, stripe_checkout_session_id)
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
     RETURNING id
   `, [senderId, receiverId, arenaSessionId, drinkName, priceCents, tier, guessesRemaining, paymentStatus, stripeCheckoutSessionId || null]);
 
-  await awardSenderPoints({ senderId, arenaSessionId, source: `rosa_${tier}` }, { db, io });
+  // Punti al mittente per l'invio stesso — piccolo incentivo per
+  // aver compiuto l'azione, coerente con tutte le altre interazioni
+  // (visita, like, superlike). La Pulse costa già denaro reale, quindi
+  // qui il valore è comunque contenuto rispetto a quello che riceverà
+  // chi la riceve.
+  await awardSenderPoints({ senderId, arenaSessionId, source: `pulse_${tier}` }, { db, io });
 
-  io.to(`user_${receiverId}`).emit('rosa_received', {
-    rosaId: rosa.id,
+  // Notifica privata in tempo reale SOLO al destinatario — mai alla
+  // stanza dell'Arena intera, questo è un evento personale.
+  // Il payload NON include mai l'identità del mittente per i tier
+  // "standalone" e "like" (resta il backend, tramite sender_id nel
+  // database, a saperlo — il frontend riceve solo ciò che è coerente
+  // con la variante scelta).
+  io.to(`user_${receiverId}`).emit('pulse_received', {
+    pulseId: pulse.id,
     tier,
     drinkType: drinkName,
     senderName: tier === 'super' ? await getSenderName(senderId, { db }) : null,
   });
 
-  return { success: true, rosaId: rosa.id };
+  return { success: true, pulseId: pulse.id };
 }
 
 async function getSenderName(senderId, { db }) {
@@ -328,142 +449,206 @@ async function getSenderName(senderId, { db }) {
   return sender.display_name;
 }
 
+// Regola di scaling concordata: profili mostrati nel mini-gioco e
+// tentativi concessi crescono con la dimensione dell'Arena, ma i
+// tentativi restano sempre sotto il numero di profili mostrati.
 async function computeGuessAllowance(arenaSessionId, { redis }) {
   const arenaSize = await redis.scard(`arena:${arenaSessionId}:radar`);
 
-  if (arenaSize <= 15)  return 1;
+  if (arenaSize <= 15)  return 1;   // Arena piccola: massima tensione, stile Happn
   if (arenaSize <= 50)  return 2;
   if (arenaSize <= 100) return 3;
-  return 4;
+  return 4;                         // Arena molto grande: mai oltre 4, anche se enorme
 }
 
 
-async function respondToRosa({ rosaId, receiverId, action }, { db, io }) {
+// ------------------------------------------------------------
+// PARTE 2 — Risposta a una Pulse: accetta / rifiuta / ignora
+// ------------------------------------------------------------
+async function respondToPulse({ pulseId, receiverId, action }, { db, io }) {
 
-  const rosa = await db.query(`SELECT * FROM roses WHERE id = $1`, [rosaId]);
-  if (!rosa || rosa.receiver_id !== receiverId) {
+  const pulse = await db.query(`SELECT * FROM pulses WHERE id = $1`, [pulseId]);
+  if (!pulse || pulse.receiver_id !== receiverId) {
     return { success: false, reason: 'not_found_or_not_yours' };
   }
-  if (rosa.status !== 'pending') {
+  if (pulse.status !== 'pending') {
     return { success: false, reason: 'already_decided' };
   }
 
+  // --- RIFIUTA o IGNORA: stesso effetto di fondo (blocco silenzioso) ---
+  // La differenza tra le due è SOLO cosa vede chi riceve nella propria
+  // interfaccia in questo istante — nessuna delle due manda al mittente
+  // un segnale esplicito di rifiuto (per non rischiare di provocare
+  // una reazione ostile in chi non accetta bene un "no").
   if (action === 'reject' || action === 'ignore') {
     await db.query(`
       INSERT INTO blocks (blocker_id, blocked_id)
       VALUES ($1, $2)
       ON CONFLICT DO NOTHING
-    `, [receiverId, rosa.sender_id]);
+    `, [receiverId, pulse.sender_id]);
 
     await db.query(`
-      UPDATE roses SET status = $1 WHERE id = $2
-    `, [action === 'reject' ? 'rejected' : 'ignored', rosaId]);
+      UPDATE pulses SET status = $1 WHERE id = $2
+    `, [action === 'reject' ? 'rejected' : 'ignored', pulseId]);
 
     return { success: true, action, senderNotified: false };
   }
 
+  // --- ACCETTA ---
+  // Vale per TUTTI e tre i tier, incluso "like": accettare garantisce
+  // sempre la consumazione, a prescindere dall'esito del minigioco.
+  // Per il tier "like", il minigioco (attemptGuess) resta disponibile
+  // DOPO l'accettazione, ma è solo un bonus per sbloccare la chat —
+  // non condiziona mai il possesso della Pulse già accettata.
   if (action === 'accept') {
     const redeemCode = generateRedeemCode();
     await db.query(`
-      UPDATE roses
+      UPDATE pulses
       SET status = 'accepted',
           chat_unlocked = $1,
           redeem_code = $2
       WHERE id = $3
-    `, [rosa.tier === 'super', redeemCode, rosaId]);
+    `, [pulse.tier === 'super', redeemCode, pulseId]);
 
+    // Punti base per aver ricevuto la Pulse, qualunque sia il tier —
+    // passa dal motore centralizzato, così eventuali moltiplicatori
+    // (premium, founder, voto Top Connector) si applicano automaticamente
+    // qui come ovunque altro nel sistema.
     await awardPoints({
       receiverId,
-      arenaSessionId: rosa.arena_session_id,
-      source: `rosa_${rosa.tier}`,
-      senderId: rosa.sender_id,
+      arenaSessionId: pulse.arena_session_id,
+      source: `pulse_${pulse.tier}`,   // 'pulse_standalone' | 'pulse_like' | 'pulse_super'
+      senderId: pulse.sender_id,
     }, { db, io });
+    // standalone → chat_unlocked resta false (nessun contatto, solo il drink)
+    // super      → chat_unlocked true da subito (il profilo era già visibile)
+    // like       → chat_unlocked resta false per ora: si sblocca SOLO
+    //              vincendo il minigioco in attemptGuess, che però non
+    //              tocca mai lo status della Pulse (già "accepted" qui)
 
+    // Pulse+Superlike: l'accettazione apre la chat di default (il
+    // profilo era già visibile prima di decidere) — creiamo davvero
+    // la conversazione, poi avvisiamo in tempo reale entrambe le
+    // parti, sempre in privato, mai sulla stanza condivisa dell'Arena.
     let chatConversationId = null;
-    if (rosa.tier === 'super') {
+    if (pulse.tier === 'super') {
       const chat = await openChatConversation({
-        userAId: rosa.sender_id, userBId: receiverId,
-        arenaSessionId: rosa.arena_session_id, unlockedVia: 'rosa_super',
+        userAId: pulse.sender_id, userBId: receiverId,
+        arenaSessionId: pulse.arena_session_id, unlockedVia: 'pulse_super',
       }, { db, io });
       chatConversationId = chat.conversationId;
 
-      io.to(`user_${rosa.sender_id}`).emit('chat_unlocked', { rosaId, withUserId: receiverId, conversationId: chatConversationId });
-      io.to(`user_${receiverId}`).emit('chat_unlocked', { rosaId, withUserId: rosa.sender_id, conversationId: chatConversationId });
+      io.to(`user_${pulse.sender_id}`).emit('chat_unlocked', { pulseId, withUserId: receiverId, conversationId: chatConversationId });
+      io.to(`user_${receiverId}`).emit('chat_unlocked', { pulseId, withUserId: pulse.sender_id, conversationId: chatConversationId });
     }
 
     return {
       success: true,
       action: 'accept',
-      chatUnlocked: rosa.tier === 'super',
+      chatUnlocked: pulse.tier === 'super',
       conversationId: chatConversationId,
       redeemCode,
-      canStillPlayGuessGame: rosa.tier === 'like',
+      canStillPlayGuessGame: pulse.tier === 'like',   // il frontend sa se offrire il minigioco dopo
     };
   }
 
   return { success: false, reason: 'invalid_action' };
 }
 
-async function attemptGuess({ rosaId, receiverId, guessedUserId }, { db, io }) {
+// ------------------------------------------------------------
+// PARTE 3 — Mini-gioco della Pulse + Like: tentativo di indovinare
+// ------------------------------------------------------------
+// NOTA IMPORTANTE: questa funzione si chiama SOLO dopo che la Pulse
+// è già stata accettata (status = 'accepted'). Non tocca mai il
+// possesso della consumazione — decide solo se si sblocca la chat.
+// Chi perde tutti i tentativi tiene comunque la Pulse già sua.
+async function attemptGuess({ pulseId, receiverId, guessedUserId }, { db, io }) {
 
-  const rosa = await db.query(`SELECT * FROM roses WHERE id = $1`, [rosaId]);
-  if (!rosa || rosa.receiver_id !== receiverId || rosa.tier !== 'like') {
+  const pulse = await db.query(`SELECT * FROM pulses WHERE id = $1`, [pulseId]);
+  if (!pulse || pulse.receiver_id !== receiverId || pulse.tier !== 'like') {
     return { success: false, reason: 'invalid_request' };
   }
-  if (rosa.status !== 'accepted') {
-    return { success: false, reason: 'must_accept_rosa_first' };
+  if (pulse.status !== 'accepted') {
+    return { success: false, reason: 'must_accept_pulse_first' };
   }
-  if (rosa.chat_unlocked) {
+  if (pulse.chat_unlocked) {
     return { success: false, reason: 'already_unlocked' };
   }
-  if (rosa.guesses_remaining <= 0) {
+  if (pulse.guesses_remaining <= 0) {
     return { success: false, reason: 'no_attempts_left' };
   }
 
-  const isCorrect = guessedUserId === rosa.sender_id;
+  const isCorrect = guessedUserId === pulse.sender_id;
 
   await db.query(`
-    INSERT INTO rose_guess_attempts (rose_id, guessed_user_id, was_correct)
+    INSERT INTO pulse_guess_attempts (pulse_id, guessed_user_id, was_correct)
     VALUES ($1, $2, $3)
-  `, [rosaId, guessedUserId, isCorrect]);
+  `, [pulseId, guessedUserId, isCorrect]);
 
+  // Ogni tentativo SBAGLIATO equivale a un vero Like inviato a quella
+  // persona — non è solo un tentativo "interno" al minigioco: chi
+  // viene indovinato per errore riceve comunque la notifica normale
+  // di un like misterioso, i suoi punti, e finisce nel sistema di
+  // reciprocità/shortlist come qualunque altro Like — altrimenti,
+  // in una serata affollata, chi ha provato a indovinare rischia di
+  // non riuscire mai a chiudere un match con chi gli piace davvero.
+  // (Il tentativo corretto invece porta già dritto alla chat, non
+  // serve passare anche dal Like: l'identità è già del tutto svelata.)
   if (!isCorrect) {
     await sendInteraction({
       senderId: receiverId,
       receiverId: guessedUserId,
-      arenaSessionId: rosa.arena_session_id,
+      arenaSessionId: pulse.arena_session_id,
       type: 'like',
     }, { db, io });
   }
 
   if (isCorrect) {
-    await db.query(`UPDATE roses SET chat_unlocked = true WHERE id = $1`, [rosaId]);
+    await db.query(`UPDATE pulses SET chat_unlocked = true WHERE id = $1`, [pulseId]);
 
+    // Match riuscito: creiamo davvero la conversazione, poi
+    // avvisiamo entrambe le parti in privato — è il momento "wow"
+    // del minigioco.
     const chat = await openChatConversation({
-      userAId: rosa.sender_id, userBId: receiverId,
-      arenaSessionId: rosa.arena_session_id, unlockedVia: 'rosa_like_match',
+      userAId: pulse.sender_id, userBId: receiverId,
+      arenaSessionId: pulse.arena_session_id, unlockedVia: 'pulse_like_match',
     }, { db, io });
 
-    io.to(`user_${rosa.sender_id}`).emit('chat_unlocked', { rosaId, withUserId: receiverId, viaGuessGame: true, conversationId: chat.conversationId });
-    io.to(`user_${receiverId}`).emit('chat_unlocked', { rosaId, withUserId: rosa.sender_id, viaGuessGame: true, conversationId: chat.conversationId });
+    io.to(`user_${pulse.sender_id}`).emit('chat_unlocked', { pulseId, withUserId: receiverId, viaGuessGame: true, conversationId: chat.conversationId });
+    io.to(`user_${receiverId}`).emit('chat_unlocked', { pulseId, withUserId: pulse.sender_id, viaGuessGame: true, conversationId: chat.conversationId });
 
+    // Bonus punti popolarità per aver vinto il minigioco — oltre al
+    // drink già garantito, e come "chance di ringraziamento" per chi
+    // ha inviato la Pulse (il match dà valore anche al suo gesto).
+    // NOTA: questo valore fisso NON passa dal motore dei moltiplicatori
+    // (è già un bonus a sé, non un punteggio "base" da moltiplicare)
+    // — se in futuro vorremo applicare anche qui i moltiplicatori,
+    // basterà cambiarlo in un source dedicato in BASE_POINTS.
     await db.query(`
       INSERT INTO points_ledger (user_id, arena_session_id, points, source)
-      VALUES ($1, $2, $3, 'rosa_guess_won')
-    `, [receiverId, rosa.arena_session_id, GUESS_GAME_BONUS_POINTS]);
+      VALUES ($1, $2, $3, 'pulse_guess_won')
+    `, [receiverId, pulse.arena_session_id, GUESS_GAME_BONUS_POINTS]);
 
-    io.to(`arena_${rosa.arena_session_id}`).emit('points_update', {
+    // Questo invece va condiviso con TUTTA l'Arena, non in privato —
+    // è l'evento che fa scorrere le posizioni sulla classifica live
+    // per chiunque la stia guardando in quel momento (l'effetto "+10"
+    // che sale sopra il nome, come nel prototipo del ranking).
+    io.to(`arena_${pulse.arena_session_id}`).emit('points_update', {
       userId: receiverId,
       points: GUESS_GAME_BONUS_POINTS,
-      source: 'rosa_guess_won',
+      source: 'pulse_guess_won',
     });
 
     return { success: true, matched: true, chatUnlocked: true, bonusPoints: GUESS_GAME_BONUS_POINTS };
   }
-  const remaining = rosa.guesses_remaining - 1;
-  await db.query(`UPDATE roses SET guesses_remaining = $1 WHERE id = $2`, [remaining, rosaId]);
+  const remaining = pulse.guesses_remaining - 1;
+  await db.query(`UPDATE pulses SET guesses_remaining = $1 WHERE id = $2`, [remaining, pulseId]);
 
   if (remaining <= 0) {
+    // Tentativi esauriti: la Pulse resta sua (era già accettata prima
+    // di iniziare il gioco), semplicemente il mittente resta un
+    // mistero per sempre. Nessun blocco: non è stato un rifiuto,
+    // solo un indovinello non riuscito.
     return { success: true, matched: false, attemptsExhausted: true };
   }
 
@@ -475,12 +660,19 @@ function generateRedeemCode() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
-async function getReceivedRoses({ userId }, { db }) {
-  const roses = await db.queryAll(`
+/**
+ * Elenco delle Pulse ricevute da un utente — usato dalla tab "Pulse"
+ * dell'app. Il nome del mittente si mostra SOLO per il tier 'super'
+ * (dove è sempre visibile per design) o se la Pulse ha già
+ * chat_unlocked = true (reciprocità/match avvenuti) — mai per una
+ * Pulse standalone/+like ancora "misteriosa".
+ */
+async function getReceivedPulses({ userId }, { db }) {
+  const pulses = await db.queryAll(`
     SELECT r.id, r.drink_type, r.tier, r.status, r.chat_unlocked, r.created_at,
            v.name AS venue_name,
            CASE WHEN r.tier = 'super' OR r.chat_unlocked THEN u.display_name ELSE NULL END AS sender_name
-    FROM roses r
+    FROM pulses r
     JOIN arena_sessions a ON a.id = r.arena_session_id
     JOIN venues v ON v.id = a.venue_id
     JOIN users u ON u.id = r.sender_id
@@ -488,15 +680,15 @@ async function getReceivedRoses({ userId }, { db }) {
     ORDER BY r.created_at DESC
   `, [userId]);
 
-  return roses.map((r) => ({
-    rosaId: r.id,
+  return pulses.map((r) => ({
+    pulseId: r.id,
     drinkType: r.drink_type,
     tier: r.tier,
     status: r.status,
     venueName: r.venue_name,
-    senderName: r.sender_name,
+    senderName: r.sender_name, // null se ancora anonimo
     createdAt: r.created_at,
   }));
 }
 
-module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createRosaRecord, respondToRosa, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedRoses };
+module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createPulseRecord, respondToPulse, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedPulses };
