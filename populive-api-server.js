@@ -20,9 +20,9 @@ const Redis = require('ioredis');
 const { setupWebSocket } = require('./populive-websocket-rooms');
 const { handleCheckin } = require('./populive-checkin-logic');
 const {
-  sendInteraction, trackProfileView, respondToRosa, attemptGuess, respondToSuperlike, getReceivedRoses,
+  sendInteraction, trackProfileView, respondToPulse, attemptGuess, respondToSuperlike, getReceivedPulses,
 } = require('./populive-interactions-logic');
-const { initiateRosaPurchase, initiatePurchase, handleStripeWebhook } = require('./populive-payments-logic');
+const { initiatePulsePurchase, initiatePurchase, handleStripeWebhook } = require('./populive-payments-logic');
 const { sendMessage, getMessages, setChatKeepPreference } = require('./populive-chat-logic');
 const { startScheduler } = require('./populive-scheduler');
 const {
@@ -89,7 +89,7 @@ function ah(fn) {
 // ------------------------------------------------------------
 // MIDDLEWARE — verifica che l'utente esista e abbia completato
 // l'onboarding, PRIMA di eseguire qualunque azione "vera"
-// dell'app. Non tocca handleCheckin/sendRosa/ecc: si mette davanti.
+// dell'app. Non tocca handleCheckin/sendPulse/ecc: si mette davanti.
 // ------------------------------------------------------------
 async function requireOnboarded(req, res, next) {
   // Ora l'identità arriva da un token firmato (JWT), mai più da un
@@ -222,20 +222,20 @@ app.post('/api/profile-views', requireOnboarded, ah(async (req, res) => {
 
 
 // ------------------------------------------------------------
-// ROSE
+// PULSE
 // ------------------------------------------------------------
-app.get('/api/users/:userId/roses', requireOnboarded, ah(async (req, res) => {
-  // Le Rose ricevute sono dati privati (mittente, drink scelto) —
+app.get('/api/users/:userId/pulses', requireOnboarded, ah(async (req, res) => {
+  // Le Pulse ricevute sono dati privati (mittente, drink scelto) —
   // SOLO il proprietario può vederle, mai un ID scritto a mano
   // nell'indirizzo. Usiamo sempre req.userId (dal token verificato),
   // ignorando qualunque cosa sia scritta nell'URL.
-  const roses = await getReceivedRoses({ userId: req.userId }, deps);
-  res.json({ success: true, roses });
+  const pulses = await getReceivedPulses({ userId: req.userId }, deps);
+  res.json({ success: true, pulses });
 }));
 
-app.post('/api/roses/send', requireOnboarded, ah(async (req, res) => {
+app.post('/api/pulses/send', requireOnboarded, ah(async (req, res) => {
   const { receiverId, arenaSessionId, drinkProductId, tier } = req.body;
-  const result = await initiateRosaPurchase({
+  const result = await initiatePulsePurchase({
     senderId: req.userId, receiverId, arenaSessionId, drinkProductId, tier,
   }, deps);
   res.json(result);
@@ -244,7 +244,7 @@ app.post('/api/roses/send', requireOnboarded, ah(async (req, res) => {
 // ------------------------------------------------------------
 // CATALOGO ACQUISTI GENERICO — Premium, crediti Like/Superlike
 // extra, badge Verificato, e qualunque cosa si aggiunga in futuro.
-// Stesso motore di pagamento della Rosa, generalizzato.
+// Stesso motore di pagamento della Pulse, generalizzato.
 // ------------------------------------------------------------
 app.get('/api/products', ah(async (req, res) => {
   const products = await db.queryAll(`
@@ -260,18 +260,18 @@ app.post('/api/purchases/initiate', requireOnboarded, ah(async (req, res) => {
   res.json(result);
 }));
 
-app.post('/api/roses/:rosaId/respond', requireOnboarded, ah(async (req, res) => {
+app.post('/api/pulses/:pulseId/respond', requireOnboarded, ah(async (req, res) => {
   const { action } = req.body; // 'accept' | 'reject' | 'ignore'
-  const result = await respondToRosa({
-    rosaId: req.params.rosaId, receiverId: req.userId, action,
+  const result = await respondToPulse({
+    pulseId: req.params.pulseId, receiverId: req.userId, action,
   }, deps);
   res.json(result);
 }));
 
-app.post('/api/roses/:rosaId/guess', requireOnboarded, ah(async (req, res) => {
+app.post('/api/pulses/:pulseId/guess', requireOnboarded, ah(async (req, res) => {
   const { guessedUserId } = req.body;
   const result = await attemptGuess({
-    rosaId: req.params.rosaId, receiverId: req.userId, guessedUserId,
+    pulseId: req.params.pulseId, receiverId: req.userId, guessedUserId,
   }, deps);
   res.json(result);
 }));
@@ -349,7 +349,7 @@ app.get('/api/venues/popular-now', ah(async (req, res) => {
 
 
 // ------------------------------------------------------------
-// DRINK DISPONIBILI IN UN LOCALE (per la schermata di invio Rosa)
+// DRINK DISPONIBILI IN UN LOCALE (per la schermata di invio Pulse)
 // ------------------------------------------------------------
 app.get('/api/venues/:venueId/drinks', ah(async (req, res) => {
   const drinks = await db.queryAll(`
@@ -373,28 +373,28 @@ app.get('/api/venues/:venueId/drinks', ah(async (req, res) => {
 // e la conferma di riscatto — un solo gesto, zero attrito operativo
 // per il locale.
 // ------------------------------------------------------------
-app.post('/api/roses/:rosaId/redeem', ah(async (req, res) => {
+app.post('/api/pulses/:pulseId/redeem', ah(async (req, res) => {
   const { redeemCode } = req.body;
 
-  const rosa = await db.query(`
-    SELECT * FROM roses WHERE id = $1 AND redeem_code = $2 AND status = 'accepted'
-  `, [req.params.rosaId, redeemCode]);
+  const pulse = await db.query(`
+    SELECT * FROM pulses WHERE id = $1 AND redeem_code = $2 AND status = 'accepted'
+  `, [req.params.pulseId, redeemCode]);
 
-  if (!rosa) {
+  if (!pulse) {
     return res.json({ success: false, reason: 'invalid_code_or_already_redeemed' });
   }
-  if (rosa.redeem_expires_at && new Date(rosa.redeem_expires_at) < new Date()) {
+  if (pulse.redeem_expires_at && new Date(pulse.redeem_expires_at) < new Date()) {
     return res.json({ success: false, reason: 'code_expired' });
   }
 
-  await db.query(`UPDATE roses SET status = 'redeemed' WHERE id = $1`, [req.params.rosaId]);
+  await db.query(`UPDATE pulses SET status = 'redeemed' WHERE id = $1`, [req.params.pulseId]);
   res.json({ success: true });
 }));
 
 // ------------------------------------------------------------
-// CANDIDATI PER IL MINIGIOCO ROSA+LIKE — profili di base di chi
+// CANDIDATI PER IL MINIGIOCO PULSE+LIKE — profili di base di chi
 // ha fatto check-in in questa Arena (nome, foto), usati per la
-// schermata "indovina chi ti ha inviato la Rosa".
+// schermata "indovina chi ti ha inviato la Pulse".
 // ------------------------------------------------------------
 app.get('/api/arenas/:arenaSessionId/guess-candidates', ah(async (req, res) => {
   const candidates = await db.queryAll(`
@@ -458,7 +458,7 @@ app.get('/api/profile/:userId/settings', requireOnboarded, ah(async (req, res) =
   // a mano per leggere/scrivere le impostazioni di un altro.
   const user = await db.query(`
     SELECT show_ranking_on_profile, sponsored_missions_enabled,
-           appears_in_historical_search, receive_roses_enabled, contact_filter
+           appears_in_historical_search, receive_pulses_enabled, contact_filter
     FROM users WHERE id = $1
   `, [req.userId]);
   if (!user) return res.json({ success: false, reason: 'user_not_found' });
@@ -469,7 +469,7 @@ app.get('/api/profile/:userId/settings', requireOnboarded, ah(async (req, res) =
       showRankingOnProfile: user.show_ranking_on_profile,
       sponsoredMissionsEnabled: user.sponsored_missions_enabled,
       appearsInHistoricalSearch: user.appears_in_historical_search,
-      receiveRosesEnabled: user.receive_roses_enabled,
+      receivePulsesEnabled: user.receive_pulses_enabled,
       contactFilter: user.contact_filter,
     },
   });
@@ -478,7 +478,7 @@ app.get('/api/profile/:userId/settings', requireOnboarded, ah(async (req, res) =
 app.post('/api/profile/:userId/settings', requireOnboarded, ah(async (req, res) => {
   const {
     showRankingOnProfile, sponsoredMissionsEnabled,
-    appearsInHistoricalSearch, receiveRosesEnabled, contactFilter,
+    appearsInHistoricalSearch, receivePulsesEnabled, contactFilter,
   } = req.body;
 
   // Stessa protezione qui, ancora più importante: senza questo,
@@ -489,12 +489,12 @@ app.post('/api/profile/:userId/settings', requireOnboarded, ah(async (req, res) 
       show_ranking_on_profile = $1,
       sponsored_missions_enabled = $2,
       appears_in_historical_search = $3,
-      receive_roses_enabled = $4,
+      receive_pulses_enabled = $4,
       contact_filter = $5
     WHERE id = $6
   `, [
     showRankingOnProfile, sponsoredMissionsEnabled,
-    appearsInHistoricalSearch, receiveRosesEnabled, contactFilter,
+    appearsInHistoricalSearch, receivePulsesEnabled, contactFilter,
     req.userId,
   ]);
 
