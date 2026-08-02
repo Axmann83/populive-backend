@@ -253,7 +253,7 @@ app.post('/api/pulses/send', requireOnboarded, ah(async (req, res) => {
 // ------------------------------------------------------------
 app.get('/api/products', ah(async (req, res) => {
   const products = await db.queryAll(`
-    SELECT id, sku, display_name, description, price_cents, product_type
+    SELECT id, sku, display_name, description, price_cents, product_type, effect_config
     FROM iap_products WHERE is_active = true ORDER BY price_cents ASC
   `);
   res.json({ success: true, products });
