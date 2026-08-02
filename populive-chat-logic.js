@@ -9,7 +9,17 @@
  * ============================================================
  */
 
+/**
+ * Va chiamata dai punti del codice dove chat_unlocked diventa true:
+ *   - respondToPulse, quando accept su tier 'super'
+ *   - attemptGuess, quando il match riesce (tier 'like')
+ *   - sendInteraction/accettazione di un Superlike semplice
+ * Crea la conversazione se non esiste già per questa coppia in
+ * questa sessione (evita duplicati con lo UNIQUE dello schema).
+ */
 async function openChatConversation({ userAId, userBId, arenaSessionId, unlockedVia }, { db, io }) {
+  // Normalizziamo l'ordine per rispettare lo UNIQUE (arena_session_id,
+  // user_a_id, user_b_id) indipendentemente da chi dei due chiama per primo.
   const [a, b] = [userAId, userBId].sort();
 
   const existing = await db.query(`
@@ -38,6 +48,9 @@ async function sendMessage({ conversationId, senderId, body }, { db, io }) {
 
   const receiverId = conv.user_a_id === senderId ? conv.user_b_id : conv.user_a_id;
 
+  // Il blocco vale anche qui: se una delle due parti ha bloccato
+  // l'altra nel frattempo (es. da un'altra interazione), niente
+  // nuovo messaggio passa.
   const blocked = await db.query(`
     SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2
   `, [receiverId, senderId]);
@@ -53,6 +66,8 @@ async function sendMessage({ conversationId, senderId, body }, { db, io }) {
     RETURNING id, created_at
   `, [conversationId, senderId, body.trim()]);
 
+  // Notifica privata SOLO al destinatario — mai alla stanza
+  // condivisa dell'Arena, un messaggio è sempre un fatto privato.
   io.to(`user_${receiverId}`).emit('chat_message', {
     conversationId,
     messageId: msg.id,
@@ -89,6 +104,14 @@ async function getMessages({ conversationId, requesterId }, { db }) {
   };
 }
 
+/**
+ * Imposta la preferenza "conserva questa chat oltre la serata" per
+ * UNA delle due parti. Bilaterale e sempre revocabile:
+ *   - resta viva oltre la sessione solo se ENTRAMBI hanno scelto "conserva"
+ *   - se una chat già conservata (closed_at ancora null dopo la fine
+ *     della sessione originale) perde il consenso di una delle due
+ *     parti, si chiude SUBITO per entrambi, non alla prossima serata
+ */
 async function setChatKeepPreference({ conversationId, userId, wantsKeep }, { db, io }) {
   const conv = await db.query(`SELECT * FROM chat_conversations WHERE id = $1`, [conversationId]);
   if (!conv) return { success: false, reason: 'conversation_not_found' };
@@ -101,6 +124,10 @@ async function setChatKeepPreference({ conversationId, userId, wantsKeep }, { db
 
   const otherUserId = conv.user_a_id === userId ? conv.user_b_id : conv.user_a_id;
 
+  // Enforcement in tempo reale: se questa chat era già stata
+  // "conservata" (sessione originale finita, closed_at ancora null
+  // grazie al doppio consenso) e adesso una delle due parti ripensa
+  // la scelta, chiudiamo SUBITO, senza aspettare nulla.
   const sessionAlreadyEnded = await isSessionEnded(conv.arena_session_id, { db });
   if (!wantsKeep && sessionAlreadyEnded && conv.closed_at === null) {
     await db.query(`UPDATE chat_conversations SET closed_at = now() WHERE id = $1`, [conversationId]);
@@ -112,6 +139,8 @@ async function setChatKeepPreference({ conversationId, userId, wantsKeep }, { db
   return { success: true, chatNowClosed: false };
 }
 
+// Controlla se la sessione a cui appartiene questa chat è già finita
+// (utile per capire se siamo nella fase "oltre la serata originale").
 async function isSessionEnded(arenaSessionId, { db }) {
   const session = await db.query(`
     SELECT is_open_for_checkin FROM arena_sessions WHERE id = $1
@@ -119,6 +148,13 @@ async function isSessionEnded(arenaSessionId, { db }) {
   return session ? !session.is_open_for_checkin : true;
 }
 
+/**
+ * Chiamata dal "motore a orari" alla chiusura di ogni Arena — chiude
+ * ALL'USO le conversazioni di quella sessione, MA rispetta il doppio
+ * consenso: se entrambe le parti hanno scelto "conserva", la chat
+ * resta aperta anche oltre la fine della serata (i messaggi restano
+ * comunque nel database per l'archivio di sicurezza in ogni caso).
+ */
 async function closeConversationsForSession(arenaSessionId, { db }) {
   await db.query(`
     UPDATE chat_conversations SET closed_at = now()
@@ -128,6 +164,17 @@ async function closeConversationsForSession(arenaSessionId, { db }) {
   `, [arenaSessionId]);
 }
 
+/**
+ * Cancellazione fisica dei messaggi 30 giorni dopo la chiusura di
+ * una conversazione — l'ultimo pezzo mancante dell'archivio di
+ * sicurezza di cui parlavamo: fino a 30 giorni i messaggi restano
+ * disponibili internamente per gestire eventuali segnalazioni di
+ * abuso, oltre quella finestra il CONTENUTO viene cancellato per
+ * davvero (minimizzazione dati). La riga della conversazione resta
+ * (chi ha parlato con chi, quando, come si è sbloccata) — è solo
+ * metadato, non contenuto sensibile, utile per statistiche leggere
+ * senza dover conservare cosa si sono detti.
+ */
 async function purgeExpiredChatMessages({ db }) {
   await db.queryAll(`
     DELETE FROM chat_messages
