@@ -207,6 +207,53 @@ async function getPopularVenuesNow({ limit = 10 }, { db }) {
 }
 
 
+/**
+ * ============================================================
+ * BACHECA STORICA
+ * ============================================================
+ * Chi ha fatto check-in in QUESTO locale negli ultimi 7 giorni —
+ * per chi ha visto qualcuno dal vivo ma non ha fatto in tempo a
+ * interagire quella sera stessa. Riusa il consenso GIÀ ESISTENTE
+ * "appears_in_historical_search" (raccolto in registrazione/
+ * Impostazioni, ma mai usato finora da nessuna parte) — solo chi
+ * lo ha attivo compare in questa ricerca. Il proprio profilo non
+ * compare mai a se stessi, e chi si è bloccato a vicenda resta
+ * escluso, stessa regola di sempre.
+ * ============================================================
+ */
+const HISTORICAL_BOARD_DAYS = 7;
+
+async function getVenueHistoricalCheckins({ venueId, requesterId }, { db }) {
+  const rows = await db.queryAll(`
+    SELECT DISTINCT ON (u.id)
+      u.id, u.display_name, u.photo_url, u.avatar_emoji, c.checked_in_at
+    FROM checkins c
+    JOIN arena_sessions a ON a.id = c.arena_session_id
+    JOIN users u ON u.id = c.user_id
+    WHERE a.venue_id = $1
+      AND c.checked_in_at >= now() - INTERVAL '${HISTORICAL_BOARD_DAYS} days'
+      AND u.appears_in_historical_search = true
+      AND u.id != $2
+      AND NOT EXISTS (
+        SELECT 1 FROM blocks
+        WHERE (blocker_id = $2 AND blocked_id = u.id)
+           OR (blocker_id = u.id AND blocked_id = $2)
+      )
+    ORDER BY u.id, c.checked_in_at DESC
+  `, [venueId, requesterId]);
+
+  return rows
+    .sort((a, b) => new Date(b.checked_in_at) - new Date(a.checked_in_at))
+    .map((r) => ({
+      userId: r.id,
+      displayName: r.display_name,
+      photoUrl: r.photo_url,
+      avatarEmoji: r.avatar_emoji || '🙂',
+      lastSeenAt: r.checked_in_at,
+    }));
+}
+
+
 module.exports = {
   MIN_SAMPLE_SIZE,
   getArrivalTimeDistribution,
@@ -215,4 +262,5 @@ module.exports = {
   getAttendanceTrend,
   generateVenueReport,
   getPopularVenuesNow,
+  getVenueHistoricalCheckins,
 };
