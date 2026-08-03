@@ -17,7 +17,7 @@ const { openChatConversation } = require('./populive-chat-logic');
 // ------------------------------------------------------------
 // PARTE 0 — Like / Superlike semplici (senza Pulse allegata)
 // ------------------------------------------------------------
-async function sendInteraction({ senderId, receiverId, arenaSessionId, type }, { db, io, redis }) {
+async function sendInteraction({ senderId, receiverId, arenaSessionId, type, viaHistoricalBoard }, { db, io, redis }) {
   // type: 'like' | 'superlike'
 
   // Controllo VERO, non solo un'interfaccia che nasconde il
@@ -30,6 +30,15 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type }, {
     return { success: false, reason: 'cannot_interact_with_self' };
   }
 
+  // Dalla Bacheca Storica si può inviare SOLO un Superlike — niente
+  // Like (l'anonimato non serve a proteggere nessuno, non è più in
+  // tempo reale) né Pulse (non sei fisicamente nel locale, non
+  // potresti mai riscattarlo). Controllo VERO qui, non solo
+  // un'interfaccia che nasconde i bottoni sbagliati.
+  if (viaHistoricalBoard && type !== 'superlike') {
+    return { success: false, reason: 'historical_board_superlike_only' };
+  }
+
   const blocked = await db.query(`
     SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2
   `, [receiverId, senderId]);
@@ -38,6 +47,17 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type }, {
   if (type === 'superlike') {
     const check = await canSendDirectContact({ senderId, receiverId }, { db });
     if (!check.allowed) return { success: false, reason: check.reason };
+
+    // Un Superlike dalla Bacheca Storica richiede Premium — è
+    // l'unica azione possibile da lì (deciso apposta così, invece
+    // di un prodotto dedicato separato), quindi è lei a generare
+    // il ricavo di questa funzionalità.
+    if (viaHistoricalBoard) {
+      const senderPremium = await db.query(`SELECT is_premium FROM users WHERE id = $1`, [senderId]);
+      if (!senderPremium?.is_premium) {
+        return { success: false, reason: 'requires_premium_for_historical_board' };
+      }
+    }
 
     // Il Superlike ora è un vero SALDO da spendere (non solo un
     // tetto oltre il quale perdi il bonus, come il Like) — se è a
@@ -67,6 +87,7 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type }, {
       arenaSessionId,
       source: type === 'superlike' ? 'superlike_received' : 'like_received',
       senderId,
+      viaHistoricalBoard,
     }, { db, io });
     receiverLocalPoints = result.localPoints;
   }
@@ -323,7 +344,7 @@ async function applyPurchaseEffect({ userId, productId, arenaSessionId, external
 // ------------------------------------------------------------
 // VISITE AL PROFILO
 // ------------------------------------------------------------
-async function trackProfileView({ viewerId, viewedUserId, arenaSessionId }, { db, io }) {
+async function trackProfileView({ viewerId, viewedUserId, arenaSessionId, viaHistoricalBoard }, { db, io }) {
   if (viewerId === viewedUserId) return { success: true, skipped: true }; // non contano le proprie
 
   const blocked = await db.query(`
@@ -349,7 +370,7 @@ async function trackProfileView({ viewerId, viewedUserId, arenaSessionId }, { db
   // Il destinatario (chi viene visto) riceve sempre il suo punto —
   // ogni visita a lui è comunque un segnale genuino, nessun rischio
   // di spam dal SUO lato.
-  await awardPoints({ receiverId: viewedUserId, arenaSessionId, source: 'profile_view' }, { db, io });
+  await awardPoints({ receiverId: viewedUserId, arenaSessionId, source: 'profile_view', viaHistoricalBoard }, { db, io });
 
   // Il VISITATORE invece riceve il proprio piccolo incentivo solo
   // per le prime N persone DIVERSE viste in questa sessione — oltre
