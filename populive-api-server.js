@@ -245,14 +245,14 @@ app.get('/api/users/:userId/public-profile', requireOnboarded, ah(async (req, re
 // INTERAZIONI (Like / Superlike / visite profilo)
 // ------------------------------------------------------------
 app.post('/api/interactions/send', requireOnboarded, ah(async (req, res) => {
-  const { receiverId, arenaSessionId, type } = req.body; // type: 'like' | 'superlike'
-  const result = await sendInteraction({ senderId: req.userId, receiverId, arenaSessionId, type }, deps);
+  const { receiverId, arenaSessionId, type, viaHistoricalBoard } = req.body; // type: 'like' | 'superlike'
+  const result = await sendInteraction({ senderId: req.userId, receiverId, arenaSessionId, type, viaHistoricalBoard }, deps);
   res.json(result);
 }));
 
 app.post('/api/profile-views', requireOnboarded, ah(async (req, res) => {
-  const { viewedUserId, arenaSessionId } = req.body;
-  const result = await trackProfileView({ viewerId: req.userId, viewedUserId, arenaSessionId }, deps);
+  const { viewedUserId, arenaSessionId, viaHistoricalBoard } = req.body;
+  const result = await trackProfileView({ viewerId: req.userId, viewedUserId, arenaSessionId, viaHistoricalBoard }, deps);
   res.json(result);
 }));
 
