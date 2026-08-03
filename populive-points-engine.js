@@ -53,6 +53,7 @@ const MULTIPLIERS = {
   top_connector_vote: 1.5, // il voto di un Top Connector vale 1.5x — solo la prima volta per persona per like/superlike, sempre per la Pulse (già limitata dal costo reale)
   consent_per_toggle: 0.05, // +5% per ciascuna delle 3 scelte facoltative attive in Impostazioni (missioni sponsorizzate/bacheca storica/ricevi Pulse) — cumulabile fino a +15% con tutte e tre attive. Si applica SIA ai punti che ricevi SIA a quelli che guadagni inviando, ed è sempre calcolato al momento (mai "congelato"): se spunti o togli una casella, il moltiplicatore cambia dalla prossima interazione in poi, coerente con la sua natura reversibile.
   verified_bonus: 0.05, // +5% per chi ha il profilo Verificato — a differenza delle 3 scelte sopra, questo NON si accende/spegne mai (badge acquistato una volta), quindi si SOMMA in modo semplice sopra gli altri invece di moltiplicarsi insieme — su 10 punti base: 15% (tutte e 3 le scelte) + 5% (verificato) = 2 punti bonus totali, non 2,075. Vale meno proprio perché non è reversibile come le altre.
+  historical_board_bonus: 1.3, // +30% sui punti guadagnati da un Superlike o una visita profilo che arrivano dalla Bacheca Storica — incentivo a comparire lì (consenso facoltativo appears_in_historical_search). Si applica SOLO a questi due source, moltiplicato in sequenza con gli altri (come premium), non sommato come il bonus Verificato — qui non c'è motivo di trattarlo diversamente, è calcolato per ogni singolo evento, non legato a uno stato permanente.
 };
 
 // Limite specifico sul LIKE INVIATO (non ricevuto): solo i primi N
@@ -106,7 +107,7 @@ async function getConsentMultiplier(userId, { db }) {
  * permanente, sempre ricalcolato sera per sera), il punteggio
  * raddoppia PRIMA degli altri moltiplicatori.
  */
-async function computePoints({ receiverId, source, senderId, arenaSessionId }, { db }) {
+async function computePoints({ receiverId, source, senderId, arenaSessionId, viaHistoricalBoard }, { db }) {
   const base = BASE_POINTS[source];
   if (base === undefined) throw new Error(`Punteggio non definito per: ${source}`);
 
@@ -146,6 +147,14 @@ async function computePoints({ receiverId, source, senderId, arenaSessionId }, {
     localPoints = Math.round(localPoints * MULTIPLIERS.premium);
   }
 
+  // Bonus Bacheca Storica — SOLO per un Superlike o una visita
+  // profilo arrivati da lì, mai per le altre fonti. Incentivo a
+  // rendersi trovabili tornando indietro nel tempo, non solo dal
+  // vivo stasera.
+  if (viaHistoricalBoard && (source === 'superlike_received' || source === 'profile_view')) {
+    localPoints = Math.round(localPoints * MULTIPLIERS.historical_board_bonus);
+  }
+
   // Bonus scelte facoltative — si applica per ultimo, sopra a tutti
   // gli altri moltiplicatori, sempre calcolato sulle impostazioni
   // ATTUALI di chi riceve.
@@ -171,8 +180,8 @@ async function computePoints({ receiverId, source, senderId, arenaSessionId }, {
  * classifica dell'Arena in tempo reale (evento PUBBLICO, va
  * a tutta la stanza — è la classifica che tutti guardano).
  */
-async function awardPoints({ receiverId, arenaSessionId, source, senderId }, { db, io }) {
-  const { localPoints, globalOnlyBonus } = await computePoints({ receiverId, source, senderId, arenaSessionId }, { db });
+async function awardPoints({ receiverId, arenaSessionId, source, senderId, viaHistoricalBoard }, { db, io }) {
+  const { localPoints, globalOnlyBonus } = await computePoints({ receiverId, source, senderId, arenaSessionId, viaHistoricalBoard }, { db });
 
   await db.query(`
     INSERT INTO points_ledger (user_id, arena_session_id, points, source, counts_toward_local)
