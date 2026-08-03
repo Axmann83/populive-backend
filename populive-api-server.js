@@ -28,7 +28,7 @@ const { startScheduler } = require('./populive-scheduler');
 const {
   createProfile, setProfilePhoto, updateProfileDetails, completeOnboarding, requireCompletedOnboarding, getPublicProfile,
 } = require('./populive-profile-onboarding');
-const { generateVenueReport, getPopularVenuesNow } = require('./populive-venue-insights');
+const { generateVenueReport, getPopularVenuesNow, getVenueHistoricalCheckins } = require('./populive-venue-insights');
 const { joinSquad } = require('./populive-connector-engine');
 const { getLocalRanking, getGlobalRanking, getUserRankingSummary, getWelcomeBackSummary } = require('./populive-ranking-queries');
 const { completeMission, getMissionPreview } = require('./populive-missions-logic');
@@ -386,6 +386,11 @@ app.get('/api/users/:userId/welcome-back', requireOnboarded, ah(async (req, res)
 app.get('/api/venues/popular-now', ah(async (req, res) => {
   const venues = await getPopularVenuesNow({}, { db });
   res.json({ success: true, venues });
+}));
+
+app.get('/api/venues/:venueId/historical-checkins', requireOnboarded, ah(async (req, res) => {
+  const people = await getVenueHistoricalCheckins({ venueId: req.params.venueId, requesterId: req.userId }, { db });
+  res.json({ success: true, people });
 }));
 
 
