@@ -31,6 +31,7 @@ const {
 const { generateVenueReport, getPopularVenuesNow } = require('./populive-venue-insights');
 const { joinSquad } = require('./populive-connector-engine');
 const { getLocalRanking, getGlobalRanking, getUserRankingSummary, getWelcomeBackSummary } = require('./populive-ranking-queries');
+const { completeMission, getMissionPreview } = require('./populive-missions-logic');
 const { requestOtp, verifyOtp, verifyToken } = require('./populive-auth-logic');
 
 const app = express();
@@ -178,6 +179,31 @@ app.post('/api/profile/:userId/edit', requireOnboarded, ah(async (req, res) => {
   res.json(result);
 }));
 
+app.post('/api/profile/:userId/location', requireAuthOnly, ah(async (req, res) => {
+  const { latitude, longitude } = req.body;
+  if (typeof latitude !== 'number' || typeof longitude !== 'number') {
+    return res.json({ success: false, reason: 'invalid_coordinates' });
+  }
+
+  // Controllo VERO lato server, non solo lato frontend — salviamo
+  // la posizione SOLO se il consenso alle missioni sponsorizzate è
+  // davvero attivo in questo momento, a prescindere da cosa mandi
+  // il client. Se qualcuno lo disattiva, la posizione smette di
+  // aggiornarsi anche se per qualche motivo arrivasse comunque una
+  // richiesta dal telefono.
+  const user = await db.query(`SELECT sponsored_missions_enabled FROM users WHERE id = $1`, [req.userId]);
+  if (!user?.sponsored_missions_enabled) {
+    return res.json({ success: false, reason: 'consent_not_active' });
+  }
+
+  await db.query(`
+    UPDATE users SET last_latitude = $1, last_longitude = $2, location_updated_at = now()
+    WHERE id = $3
+  `, [latitude, longitude, req.userId]);
+
+  res.json({ success: true });
+}));
+
 app.post('/api/profile/:userId/onboarding', requireAuthOnly, ah(async (req, res) => {
   const result = await completeOnboarding({ userId: req.userId, consentChoices: req.body }, { db });
   res.json(result);
@@ -190,6 +216,16 @@ app.post('/api/profile/:userId/onboarding', requireAuthOnly, ah(async (req, res)
 app.post('/api/checkin', requireOnboarded, ah(async (req, res) => {
   const { venueId } = req.body;
   const result = await handleCheckin({ userId: req.userId, venueId }, deps);
+  res.json(result);
+}));
+
+app.get('/api/missions/:missionId', requireOnboarded, ah(async (req, res) => {
+  const result = await getMissionPreview({ missionId: req.params.missionId }, { db });
+  res.json(result);
+}));
+
+app.post('/api/missions/:missionId/complete', requireOnboarded, ah(async (req, res) => {
+  const result = await completeMission({ missionId: req.params.missionId, userId: req.userId }, deps);
   res.json(result);
 }));
 
