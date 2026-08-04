@@ -18,7 +18,7 @@ const { createDb } = require('./populive-db-adapter');
 const Redis = require('ioredis');
 
 const { setupWebSocket } = require('./populive-websocket-rooms');
-const { handleCheckin } = require('./populive-checkin-logic');
+const { handleCheckin, createVirtualVenue, getAllVenuesForMap } = require('./populive-checkin-logic');
 const {
   sendInteraction, trackProfileView, respondToPulse, attemptGuess, respondToSuperlike, getReceivedPulses, getPulseBalance,
 } = require('./populive-interactions-logic');
@@ -380,6 +380,17 @@ app.get('/api/users/:userId/ranking-summary', ah(async (req, res) => {
 
 app.get('/api/users/:userId/welcome-back', requireOnboarded, ah(async (req, res) => {
   const result = await getWelcomeBackSummary({ userId: req.userId }, { db });
+  res.json(result);
+}));
+
+app.get('/api/venues/map', ah(async (req, res) => {
+  const venues = await getAllVenuesForMap({}, { db });
+  res.json({ success: true, venues });
+}));
+
+app.post('/api/venues/create', requireOnboarded, ah(async (req, res) => {
+  const { name, area, latitude, longitude, venueType } = req.body;
+  const result = await createVirtualVenue({ name, area, latitude, longitude, venueType }, { db });
   res.json(result);
 }));
 
