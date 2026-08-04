@@ -201,27 +201,71 @@ async function getAllVenuesForMap({}, { db }) {
   const venues = await db.queryAll(`
     SELECT
       v.id, v.name, v.latitude, v.longitude, v.venue_type, v.is_partner,
-      COALESCE(c.checkin_count, 0) AS checkin_count
+      COALESCE(c.checkin_count, 0) AS checkin_count,
+      COALESCE(c.male_count, 0) AS male_count,
+      COALESCE(c.female_count, 0) AS female_count,
+      COALESCE(c.other_count, 0) AS other_count,
+      COALESCE(a.is_active, false) AS arena_active
     FROM venues v
+    LEFT JOIN arena_sessions a
+      ON a.venue_id = v.id AND a.session_date = current_business_date(v.id)
     LEFT JOIN LATERAL (
-      SELECT COUNT(chk.id) AS checkin_count
-      FROM arena_sessions a
-      JOIN checkins chk ON chk.arena_session_id = a.id
-      WHERE a.venue_id = v.id AND a.session_date = current_business_date(v.id)
+      SELECT
+        COUNT(chk.id) AS checkin_count,
+        COUNT(u.id) FILTER (WHERE u.gender_for_stats = 'male') AS male_count,
+        COUNT(u.id) FILTER (WHERE u.gender_for_stats = 'female') AS female_count,
+        COUNT(u.id) FILTER (WHERE u.gender_for_stats = 'other') AS other_count
+      FROM arena_sessions a2
+      JOIN checkins chk ON chk.arena_session_id = a2.id
+      LEFT JOIN users u ON u.id = chk.user_id
+      WHERE a2.venue_id = v.id AND a2.session_date = current_business_date(v.id)
     ) c ON true
   `);
 
-  return venues.map((v) => ({
-    venueId: v.id,
-    name: v.name,
-    latitude: v.latitude,
-    longitude: v.longitude,
-    venueType: v.venue_type,
-    isPartner: v.is_partner,
-    // Popolarità mostrata SOLO per i locali del network ufficiale —
-    // per gli altri il dato non ha nessun significato reale.
-    checkinCount: v.is_partner ? parseInt(v.checkin_count) : null,
-  }));
+  return venues.map((v) => {
+    // Popolarità/affluenza mostrata SOLO per i locali del network
+    // ufficiale — per gli altri il dato non ha nessun significato
+    // reale (nessuno lo gestisce davvero dall'altra parte).
+    if (!v.is_partner) {
+      return {
+        venueId: v.id,
+        name: v.name,
+        latitude: v.latitude,
+        longitude: v.longitude,
+        venueType: v.venue_type,
+        isPartner: false,
+        checkinCount: null,
+        genderStats: null,
+        arenaActive: false,
+      };
+    }
+
+    const male = parseInt(v.male_count) || 0;
+    const female = parseInt(v.female_count) || 0;
+    const other = parseInt(v.other_count) || 0;
+    const sharedTotal = male + female + other;
+
+    return {
+      venueId: v.id,
+      name: v.name,
+      latitude: v.latitude,
+      longitude: v.longitude,
+      venueType: v.venue_type,
+      isPartner: true,
+      checkinCount: parseInt(v.checkin_count),
+      arenaActive: v.arena_active,
+      // Percentuali calcolate SOLO su chi ha condiviso — se nessuno
+      // lo ha fatto, il frontend semplicemente non mostra questa
+      // parte (sharedTotal = 0 lo segnala chiaramente), stessa
+      // regola già usata in "Esplora".
+      genderStats: sharedTotal > 0 ? {
+        sharedTotal,
+        malePct: Math.round((male / sharedTotal) * 100),
+        femalePct: Math.round((female / sharedTotal) * 100),
+        otherPct: Math.round((other / sharedTotal) * 100),
+      } : null,
+    };
+  });
 }
 
 module.exports = { handleCheckin, createVirtualVenue, getAllVenuesForMap };
