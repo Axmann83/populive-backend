@@ -431,7 +431,15 @@ app.get('/api/venues/:venueId/drinks', ah(async (req, res) => {
 // per il locale.
 // ------------------------------------------------------------
 app.post('/api/pulses/:pulseId/redeem', ah(async (req, res) => {
-  const { redeemCode } = req.body;
+  const { redeemCode, venueId } = req.body;
+
+  // Il locale del riscatto è OBBLIGATORIO — un Pulse può nascere in
+  // un posto e venire speso in uno completamente diverso, e senza
+  // sapere DOVE avviene il riscatto vero non sapremmo mai a chi
+  // girare i soldi della commissione.
+  if (!venueId) {
+    return res.json({ success: false, reason: 'venue_required_for_redeem' });
+  }
 
   const pulse = await db.query(`
     SELECT * FROM pulses WHERE id = $1 AND redeem_code = $2 AND status = 'accepted'
@@ -444,7 +452,9 @@ app.post('/api/pulses/:pulseId/redeem', ah(async (req, res) => {
     return res.json({ success: false, reason: 'code_expired' });
   }
 
-  await db.query(`UPDATE pulses SET status = 'redeemed' WHERE id = $1`, [req.params.pulseId]);
+  await db.query(`
+    UPDATE pulses SET status = 'redeemed', redeemed_venue_id = $1 WHERE id = $2
+  `, [venueId, req.params.pulseId]);
   res.json({ success: true });
 }));
 
