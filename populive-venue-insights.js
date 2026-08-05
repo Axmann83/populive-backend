@@ -136,14 +136,17 @@ async function getAttendanceTrend({ venueId, fromDate, toDate }, { db }) {
  * partner). Unisce le quattro funzioni sopra in un'unica risposta.
  */
 async function generateVenueReport({ venueId, fromDate, toDate }, { db }) {
-  const [arrivals, dwellTime, drinks, attendance] = await Promise.all([
+  const [arrivals, dwellTime, drinks, attendance, socialInteractions, returnRate, peakAttendance] = await Promise.all([
     getArrivalTimeDistribution({ venueId, fromDate, toDate }, { db }),
     getAverageDwellTime({ venueId, fromDate, toDate }, { db }),
     getPopularDrinks({ venueId, fromDate, toDate }, { db }),
     getAttendanceTrend({ venueId, fromDate, toDate }, { db }),
+    getSocialInteractionsCount({ venueId, fromDate, toDate }, { db }),
+    getReturnRate({ venueId, fromDate, toDate }, { db }),
+    getPeakConcurrentAttendance({ venueId, fromDate, toDate }, { db }),
   ]);
 
-  return { arrivals, dwellTime, drinks, attendance, generatedAt: new Date() };
+  return { arrivals, dwellTime, drinks, attendance, socialInteractions, returnRate, peakAttendance, generatedAt: new Date() };
 }
 
 
@@ -259,12 +262,130 @@ async function getVenueHistoricalCheckins({ venueId, requesterId }, { db }) {
 }
 
 
+/**
+ * Interazioni sociali generate nel locale — quanti Like/Superlike
+ * sono stati scambiati lì dentro. Un argomento di vendita che
+ * nessun locale tradizionale può offrire: non solo "quante persone
+ * sono venute", ma "quante connessioni vere sono nate qui".
+ */
+async function getSocialInteractionsCount({ venueId, fromDate, toDate }, { db }) {
+  const result = await db.query(`
+    SELECT
+      COUNT(*) AS total,
+      COUNT(*) FILTER (WHERE type = 'like') AS likes,
+      COUNT(*) FILTER (WHERE type = 'superlike') AS superlikes
+    FROM interactions
+    JOIN arena_sessions ON arena_sessions.id = interactions.arena_session_id
+    WHERE arena_sessions.venue_id = $1
+      AND arena_sessions.session_date BETWEEN $2 AND $3
+  `, [venueId, fromDate, toDate]);
+
+  const total = parseInt(result.total) || 0;
+  if (total < MIN_SAMPLE_SIZE) {
+    return { available: false, reason: 'sample_too_small', minRequired: MIN_SAMPLE_SIZE };
+  }
+
+  return {
+    available: true,
+    total,
+    likes: parseInt(result.likes) || 0,
+    superlikes: parseInt(result.superlikes) || 0,
+  };
+}
+
+
+/**
+ * Tasso di ritorno — quante persone sono tornate almeno una
+ * seconda volta nell'intervallo considerato. Segnale forte di
+ * fedeltà, utile in un pitch commerciale quanto (o più) del
+ * numero grezzo di presenze.
+ */
+async function getReturnRate({ venueId, fromDate, toDate }, { db }) {
+  const result = await db.query(`
+    SELECT
+      COUNT(*) AS total_visitors,
+      COUNT(*) FILTER (WHERE visit_count > 1) AS returning_visitors
+    FROM (
+      SELECT checkins.user_id, COUNT(DISTINCT arena_sessions.session_date) AS visit_count
+      FROM checkins
+      JOIN arena_sessions ON arena_sessions.id = checkins.arena_session_id
+      WHERE arena_sessions.venue_id = $1
+        AND arena_sessions.session_date BETWEEN $2 AND $3
+      GROUP BY checkins.user_id
+    ) visits
+  `, [venueId, fromDate, toDate]);
+
+  const totalVisitors = parseInt(result.total_visitors) || 0;
+  if (totalVisitors < MIN_SAMPLE_SIZE) {
+    return { available: false, reason: 'sample_too_small', minRequired: MIN_SAMPLE_SIZE };
+  }
+
+  const returningVisitors = parseInt(result.returning_visitors) || 0;
+  return {
+    available: true,
+    totalVisitors,
+    returningVisitors,
+    returnRatePct: Math.round((returningVisitors / totalVisitors) * 100),
+  };
+}
+
+
+/**
+ * Picco di presenze simultanee — non il totale della serata, ma
+ * il momento esatto di massimo affollamento. Approssimato con
+ * "fotografie" ogni 30 minuti (quante persone risultano dentro in
+ * quel momento, tra chi ha fatto check-in e non ha ancora fatto
+ * check-out) — non è un dato al secondo, ma sufficiente per capire
+ * quando davvero un locale "esplode".
+ */
+async function getPeakConcurrentAttendance({ venueId, fromDate, toDate }, { db }) {
+  const rows = await db.query(`
+    WITH hourly_snapshots AS (
+      SELECT
+        a.session_date,
+        snap_time,
+        COUNT(c.id) AS concurrent_count
+      FROM arena_sessions a
+      CROSS JOIN LATERAL generate_series(
+        a.opened_at,
+        a.opened_at + INTERVAL '8 hours',
+        INTERVAL '30 minutes'
+      ) AS snap_time
+      LEFT JOIN checkins c
+        ON c.arena_session_id = a.id
+        AND c.checked_in_at <= snap_time
+        AND (c.checked_out_at IS NULL OR c.checked_out_at > snap_time)
+      WHERE a.venue_id = $1
+        AND a.session_date BETWEEN $2 AND $3
+      GROUP BY a.session_date, snap_time
+    )
+    SELECT session_date, MAX(concurrent_count) AS peak
+    FROM hourly_snapshots
+    GROUP BY session_date
+    ORDER BY session_date
+  `, [venueId, fromDate, toDate]);
+
+  if (rows.length === 0) {
+    return { available: false, reason: 'sample_too_small', minRequired: MIN_SAMPLE_SIZE };
+  }
+
+  const peaks = rows.map((r) => parseInt(r.peak) || 0);
+  const allTimeHigh = Math.max(...peaks);
+  const avgPeak = Math.round(peaks.reduce((sum, p) => sum + p, 0) / peaks.length);
+
+  return { available: true, allTimeHigh, avgPeakPerNight: avgPeak, nightlyPeaks: rows };
+}
+
+
 module.exports = {
   MIN_SAMPLE_SIZE,
   getArrivalTimeDistribution,
   getAverageDwellTime,
   getPopularDrinks,
   getAttendanceTrend,
+  getSocialInteractionsCount,
+  getReturnRate,
+  getPeakConcurrentAttendance,
   generateVenueReport,
   getPopularVenuesNow,
   getVenueHistoricalCheckins,
