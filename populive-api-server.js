@@ -321,6 +321,15 @@ app.get('/api/products', ah(async (req, res) => {
   res.json({ success: true, products });
 }));
 
+app.post('/api/dashboard/products/:productId/price', requireArchitect, ah(async (req, res) => {
+  const { priceCents } = req.body;
+  if (!Number.isInteger(priceCents) || priceCents <= 0) {
+    return res.json({ success: false, reason: 'invalid_price' });
+  }
+  await db.query(`UPDATE iap_products SET price_cents = $1 WHERE id = $2`, [priceCents, req.params.productId]);
+  res.json({ success: true });
+}));
+
 app.post('/api/purchases/initiate', requireOnboarded, ah(async (req, res) => {
   const { productId, arenaSessionId } = req.body;
   const result = await initiatePurchase({ userId: req.userId, productId, arenaSessionId }, { db });
@@ -411,6 +420,16 @@ app.get('/api/users/:userId/welcome-back', requireOnboarded, ah(async (req, res)
   res.json(result);
 }));
 
+app.get('/api/dashboard/venue-report/:venueId', requireArchitect, ah(async (req, res) => {
+  // Se non indicate, l'intervallo di default è "ultimi 30 giorni" —
+  // abbastanza per un pitch commerciale vero, senza dover
+  // specificare nulla la prima volta che si apre il report.
+  const toDate = req.query.toDate || new Date().toISOString().slice(0, 10);
+  const fromDate = req.query.fromDate || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const report = await generateVenueReport({ venueId: req.params.venueId, fromDate, toDate }, { db });
+  res.json({ success: true, report, fromDate, toDate });
+}));
+
 app.get('/api/venues/map', ah(async (req, res) => {
   const venues = await getAllVenuesForMap({}, { db });
   res.json({ success: true, venues });
@@ -461,23 +480,38 @@ app.get('/api/venues/:venueId/drinks', ah(async (req, res) => {
 app.post('/api/pulses/:pulseId/redeem', ah(async (req, res) => {
   const { redeemCode, venueId } = req.body;
 
-  // Il locale del riscatto è OBBLIGATORIO — un Pulse può nascere in
-  // un posto e venire speso in uno completamente diverso, e senza
-  // sapere DOVE avviene il riscatto vero non sapremmo mai a chi
-  // girare i soldi della commissione.
+  // Il locale del riscatto è OBBLIGATORIO — e ora deve corrispondere
+  // ESATTAMENTE al locale in cui il Pulse è stato ricevuto: chi lo
+  // riceve deve spenderlo lì o perderlo, non può portarselo dietro
+  // in un altro locale. Più semplice per la contabilità (nessun
+  // dubbio su a chi girare la commissione) e un incentivo in più
+  // per il locale (chi non vuole perdere il regalo deve consumare
+  // lì prima di andarsene altrove).
   if (!venueId) {
     return res.json({ success: false, reason: 'venue_required_for_redeem' });
   }
 
   const pulse = await db.query(`
-    SELECT * FROM pulses WHERE id = $1 AND redeem_code = $2 AND status = 'accepted'
+    SELECT p.*, a.venue_id AS origin_venue_id
+    FROM pulses p
+    JOIN arena_sessions a ON a.id = p.arena_session_id
+    WHERE p.id = $1 AND p.redeem_code = $2
   `, [req.params.pulseId, redeemCode]);
 
   if (!pulse) {
     return res.json({ success: false, reason: 'invalid_code_or_already_redeemed' });
   }
+  if (pulse.status === 'expired') {
+    return res.json({ success: false, reason: 'pulse_expired_changed_venue' });
+  }
+  if (pulse.status !== 'accepted') {
+    return res.json({ success: false, reason: 'invalid_code_or_already_redeemed' });
+  }
   if (pulse.redeem_expires_at && new Date(pulse.redeem_expires_at) < new Date()) {
     return res.json({ success: false, reason: 'code_expired' });
+  }
+  if (pulse.origin_venue_id !== venueId) {
+    return res.json({ success: false, reason: 'wrong_venue', originVenueId: pulse.origin_venue_id });
   }
 
   await db.query(`
