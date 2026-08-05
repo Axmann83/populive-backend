@@ -67,6 +67,24 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
   `, [userId, session.id]);
 
   // ------------------------------------------------------------
+  // STEP 2.5 — Un Pulse è legato al locale in cui è stato ricevuto:
+  // appena la persona fa check-in in un locale DIVERSO, ogni Pulse
+  // ancora da riscattare (mai una missione, mai punti — quelli
+  // restano sempre) va perso. Se invece fa due serate di fila nello
+  // STESSO locale, i Pulse restano validi anche il giorno dopo —
+  // la scadenza è legata al comportamento reale della persona, non
+  // a un timer fisso. Confrontiamo per LOCALE, non per singola
+  // sessione/serata, proprio per questo.
+  await db.query(`
+    UPDATE pulses SET status = 'expired'
+    WHERE receiver_id = $1
+      AND status = 'accepted'
+      AND arena_session_id IN (
+        SELECT id FROM arena_sessions WHERE venue_id != $2
+      )
+  `, [userId, venueId]);
+
+  // ------------------------------------------------------------
   // STEP 3 — Aggiornare lo stato "vivo" in Redis
   // ------------------------------------------------------------
   // CASO LIMITE 2 — Redis momentaneamente irraggiungibile.
