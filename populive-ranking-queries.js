@@ -12,7 +12,33 @@
  * ============================================================
  */
 
-async function getLocalRanking({ arenaSessionId }, { db }) {
+async function getLocalRanking({ arenaSessionId, hashtag, gender }, { db }) {
+  // Stessi filtri facoltativi della classifica globale — utili
+  // soprattutto nelle prime serate test, per premiare a fine serata
+  // il ragazzo/la ragazza più popolare tra un pubblico specifico
+  // (es. #nightlife), o per un accordo con un brand di settore.
+  const conditions = [];
+  const params = [arenaSessionId];
+  let paramIndex = 2;
+
+  let hashtagJoin = '';
+  if (hashtag) {
+    hashtagJoin = `
+      JOIN user_hashtags uh ON uh.user_id = u.id
+      JOIN hashtags h ON h.id = uh.hashtag_id AND LOWER(h.name) = LOWER($${paramIndex})
+    `;
+    params.push(hashtag.replace(/^#/, '').trim());
+    paramIndex++;
+  }
+
+  if (gender) {
+    conditions.push(`u.gender_for_stats = $${paramIndex}`);
+    params.push(gender);
+    paramIndex++;
+  }
+
+  const extraWhere = conditions.length > 0 ? `AND ${conditions.join(' AND ')}` : '';
+
   const rows = await db.queryAll(`
     SELECT
       u.id AS user_id,
@@ -23,6 +49,7 @@ async function getLocalRanking({ arenaSessionId }, { db }) {
       cs.is_top_connector,
       ss.is_top_spender
     FROM users u
+    ${hashtagJoin}
     LEFT JOIN points_ledger pl
       ON pl.user_id = u.id
       AND pl.arena_session_id = $1
@@ -33,9 +60,10 @@ async function getLocalRanking({ arenaSessionId }, { db }) {
       ON ss.user_id = u.id AND ss.arena_session_id = $1
     JOIN checkins c
       ON c.user_id = u.id AND c.arena_session_id = $1
+    WHERE true ${extraWhere}
     GROUP BY u.id, u.display_name, u.avatar_emoji, u.photo_url, cs.is_top_connector, ss.is_top_spender
     ORDER BY local_points DESC
-  `, [arenaSessionId]);
+  `, params);
 
   return rows.map((r, i) => ({
     rank: i + 1,
@@ -49,7 +77,34 @@ async function getLocalRanking({ arenaSessionId }, { db }) {
   }));
 }
 
-async function getGlobalRanking({ limit = 100 }, { db }) {
+async function getGlobalRanking({ limit = 100, hashtag, gender }, { db }) {
+  // Filtri facoltativi — per rispondere a domande tipo "chi è il
+  // più in alto tra chi ha #nightlife" o "solo donne". Nessuno dei
+  // due è obbligatorio: passati entrambi vuoti, la query si
+  // comporta esattamente come prima.
+  const conditions = [];
+  const params = [];
+  let paramIndex = 1;
+
+  let hashtagJoin = '';
+  if (hashtag) {
+    hashtagJoin = `
+      JOIN user_hashtags uh ON uh.user_id = u.id
+      JOIN hashtags h ON h.id = uh.hashtag_id AND LOWER(h.name) = LOWER($${paramIndex})
+    `;
+    params.push(hashtag.replace(/^#/, '').trim());
+    paramIndex++;
+  }
+
+  if (gender) {
+    conditions.push(`u.gender_for_stats = $${paramIndex}`);
+    params.push(gender);
+    paramIndex++;
+  }
+
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  params.push(limit);
+
   const rows = await db.queryAll(`
     SELECT
       u.id AS user_id,
@@ -59,12 +114,14 @@ async function getGlobalRanking({ limit = 100 }, { db }) {
       COALESCE(SUM(pl.points), 0) AS global_points,
       fb.user_id IS NOT NULL AS is_founder
     FROM users u
+    ${hashtagJoin}
     LEFT JOIN points_ledger pl ON pl.user_id = u.id
     LEFT JOIN founder_bracelets fb ON fb.user_id = u.id
+    ${whereClause}
     GROUP BY u.id, u.display_name, u.avatar_emoji, u.photo_url, fb.user_id
     ORDER BY global_points DESC
-    LIMIT $1
-  `, [limit]);
+    LIMIT $${paramIndex}
+  `, params);
 
   return rows.map((r, i) => ({
     rank: i + 1,
