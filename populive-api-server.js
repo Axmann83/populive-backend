@@ -129,10 +129,31 @@ async function requireAuthOnly(req, res, next) {
   next();
 }
 
+/**
+ * Controllo d'accesso alla DASHBOARD — richiede prima un token
+ * valido (stesso identico login di sempre, nessun account separato
+ * da gestire), poi verifica che quella persona sia davvero uno dei
+ * 5 ARCHITETTI (i veri co-fondatori) — MAI i Founder (fino a 100
+ * persone col braccialetto fisico, privilegi automatici in-app ma
+ * nessun accesso alla dashboard, tabella completamente diversa:
+ * founder_bracelets). Due ruoli, due tabelle, da non confondere.
+ */
+async function requireArchitect(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  if (!token) return res.status(401).json({ success: false, reason: 'missing_token' });
 
-// ------------------------------------------------------------
-// AUTENTICAZIONE — telefono + SMS. Nessun requireOnboarded qui,
-// ovviamente: è proprio il percorso per OTTENERE il token.
+  const { valid, userId } = verifyToken(token);
+  if (!valid) return res.status(401).json({ success: false, reason: 'invalid_or_expired_token' });
+
+  const architect = await db.query(`SELECT user_id FROM architects WHERE user_id = $1`, [userId]);
+  if (!architect) return res.status(403).json({ success: false, reason: 'not_an_architect' });
+
+  req.userId = userId;
+  next();
+}
+
+
 // ------------------------------------------------------------
 app.post('/api/auth/request-otp', ah(async (req, res) => {
   const { phoneNumber } = req.body;
@@ -154,6 +175,11 @@ app.get('/api/auth/me', requireAuthOnly, ah(async (req, res) => {
   const user = await db.query(`SELECT id, onboarding_completed FROM users WHERE id = $1`, [req.userId]);
   if (!user) return res.json({ success: false, reason: 'user_not_found' });
   res.json({ success: true, userId: user.id, onboardingCompleted: user.onboarding_completed });
+}));
+
+app.get('/api/auth/is-architect', requireAuthOnly, ah(async (req, res) => {
+  const architect = await db.query(`SELECT user_id FROM architects WHERE user_id = $1`, [req.userId]);
+  res.json({ success: true, isArchitect: !!architect });
 }));
 
 
