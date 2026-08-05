@@ -355,13 +355,15 @@ app.post('/api/table/join', requireOnboarded, ah(async (req, res) => {
 // sincronizzata a mano.
 // ------------------------------------------------------------
 app.get('/api/arenas/:arenaSessionId/ranking', ah(async (req, res) => {
-  const ranking = await getLocalRanking({ arenaSessionId: req.params.arenaSessionId }, { db });
+  const { hashtag, gender } = req.query;
+  const ranking = await getLocalRanking({ arenaSessionId: req.params.arenaSessionId, hashtag, gender }, { db });
   res.json({ success: true, ranking });
 }));
 
 app.get('/api/ranking/global', ah(async (req, res) => {
   const limit = parseInt(req.query.limit) || 100;
-  const ranking = await getGlobalRanking({ limit }, { db });
+  const { hashtag, gender } = req.query;
+  const ranking = await getGlobalRanking({ limit, hashtag, gender }, { db });
   res.json({ success: true, ranking });
 }));
 
