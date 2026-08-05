@@ -99,18 +99,24 @@ async function getPopularDrinks({ venueId, fromDate, toDate }, { db }) {
 
 
 /**
- * Rapporto uomini/donne e affluenza serale nel tempo — riusa gli
- * stessi principi delle card "esplora locali" già costruite lato
- * utente, qui però su un intervallo di date invece che sulla sola
- * serata corrente.
+ * Rapporto uomini/donne e affluenza serale nel tempo — la prima
+ * versione di questa funzione prometteva il rapporto di genere nel
+ * commento ma non lo calcolava davvero (scritta prima che
+ * esistesse gender_for_stats) — corretto ora che il dato c'è
+ * per davvero, riusando la stessa logica già in uso per "Esplora
+ * locali" lato utente.
  */
 async function getAttendanceTrend({ venueId, fromDate, toDate }, { db }) {
   const rows = await db.query(`
     SELECT
       arena_sessions.session_date,
-      COUNT(DISTINCT checkins.user_id) AS attendees
+      COUNT(DISTINCT checkins.user_id) AS attendees,
+      COUNT(DISTINCT checkins.user_id) FILTER (WHERE u.gender_for_stats = 'male') AS male_attendees,
+      COUNT(DISTINCT checkins.user_id) FILTER (WHERE u.gender_for_stats = 'female') AS female_attendees,
+      COUNT(DISTINCT checkins.user_id) FILTER (WHERE u.gender_for_stats = 'other') AS other_attendees
     FROM arena_sessions
     LEFT JOIN checkins ON checkins.arena_session_id = arena_sessions.id
+    LEFT JOIN users u ON u.id = checkins.user_id
     WHERE arena_sessions.venue_id = $1
       AND arena_sessions.session_date BETWEEN $2 AND $3
     GROUP BY arena_sessions.session_date
@@ -150,10 +156,9 @@ async function generateVenueReport({ venueId, fromDate, toDate }, { db }) {
  * profili individuali — stessa regola di sempre per questo tipo
  * di vista.
  *
- * NOTA ONESTA: il rapporto uomini/donne che la demo mostrava non
- * è ancora costruibile con dati veri — non abbiamo mai raccolto
- * quel dato in fase di registrazione. Tolto per ora, non
- * inventato con un dato finto.
+ * Il rapporto uomini/donne è calcolato SOLO su chi ha scelto di
+ * condividere il dato in fase di registrazione (gender_for_stats,
+ * facoltativo) — mai un valore forzato per chi non l'ha condiviso.
  * ============================================================
  */
 async function getPopularVenuesNow({ limit = 10 }, { db }) {
