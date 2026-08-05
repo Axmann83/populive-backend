@@ -82,7 +82,7 @@ async function getGlobalRanking({ limit = 100, hashtag, gender }, { db }) {
   // più in alto tra chi ha #nightlife" o "solo donne". Nessuno dei
   // due è obbligatorio: passati entrambi vuoti, la query si
   // comporta esattamente come prima.
-  const conditions = [];
+  const conditions = ['u.onboarding_completed = true']; // SEMPRE — mai mostrare righe "fantasma" (es. account pre-creati per Architetti/Founder/test, mai passati dalla registrazione vera)
   const params = [];
   let paramIndex = 1;
 
