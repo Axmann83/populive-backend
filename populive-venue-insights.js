@@ -377,6 +377,51 @@ async function getPeakConcurrentAttendance({ venueId, fromDate, toDate }, { db }
 }
 
 
+/**
+ * Report commissioni per locale — quante Pulse sono state
+ * riscattate lì (contate tutte, non solo negli ultimi 30 giorni,
+ * dato che serve sapere il totale da girare, non solo l'andamento
+ * recente) e quanto spetta al locale in base alla percentuale
+ * d'accordo. Il valore di riferimento per Pulse è il prezzo
+ * ATTUALE del pacchetto singolo (pulse_single_1) — un'approssimazione
+ * dichiarata, dato che i crediti possono venire da fonti diverse
+ * (gratis, pre-pagati, acquistati), non un calcolo esatto centesimo
+ * per centesimo.
+ */
+async function getCommissionsReport({}, { db }) {
+  const referencePrice = await db.query(`
+    SELECT price_cents FROM iap_products WHERE sku = 'pulse_single_1' AND is_active = true
+  `);
+  const pricePerPulseCents = referencePrice?.price_cents || 0;
+
+  const rows = await db.queryAll(`
+    SELECT
+      v.id, v.name, v.commission_venue_pct,
+      COUNT(p.id) AS redeemed_count
+    FROM venues v
+    LEFT JOIN pulses p ON p.redeemed_venue_id = v.id AND p.status = 'redeemed'
+    WHERE v.is_partner = true
+    GROUP BY v.id, v.name, v.commission_venue_pct
+    ORDER BY redeemed_count DESC
+  `);
+
+  return rows.map((r) => {
+    const redeemedCount = parseInt(r.redeemed_count) || 0;
+    const totalCents = redeemedCount * pricePerPulseCents;
+    const venuePct = r.commission_venue_pct;
+    const venueOwedCents = Math.round(totalCents * (venuePct / 100));
+
+    return {
+      venueId: r.id,
+      venueName: r.name,
+      commissionVenuePct: venuePct,
+      redeemedCount,
+      venueOwedCents,
+    };
+  });
+}
+
+
 module.exports = {
   MIN_SAMPLE_SIZE,
   getArrivalTimeDistribution,
@@ -386,6 +431,7 @@ module.exports = {
   getSocialInteractionsCount,
   getReturnRate,
   getPeakConcurrentAttendance,
+  getCommissionsReport,
   generateVenueReport,
   getPopularVenuesNow,
   getVenueHistoricalCheckins,
