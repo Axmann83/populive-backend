@@ -31,7 +31,7 @@ const {
 const { generateVenueReport, getPopularVenuesNow, getVenueHistoricalCheckins } = require('./populive-venue-insights');
 const { joinSquad } = require('./populive-connector-engine');
 const { getLocalRanking, getGlobalRanking, getUserRankingSummary, getWelcomeBackSummary } = require('./populive-ranking-queries');
-const { completeMission, getMissionPreview } = require('./populive-missions-logic');
+const { createMission, getAllMissions, getMissionsNearUser, completeMission, getMissionPreview } = require('./populive-missions-logic');
 const { requestOtp, verifyOtp, verifyToken } = require('./populive-auth-logic');
 
 const app = express();
@@ -242,6 +242,22 @@ app.post('/api/profile/:userId/onboarding', requireAuthOnly, ah(async (req, res)
 app.post('/api/checkin', requireOnboarded, ah(async (req, res) => {
   const { venueId } = req.body;
   const result = await handleCheckin({ userId: req.userId, venueId }, deps);
+  res.json(result);
+}));
+
+app.get('/api/dashboard/missions', requireArchitect, ah(async (req, res) => {
+  const missions = await getAllMissions({}, { db });
+  res.json({ success: true, missions });
+}));
+
+app.post('/api/dashboard/missions', requireArchitect, ah(async (req, res) => {
+  const { sponsorName, venueId, claimText, bonusPoints, radiusMeters, hashtagFilter, dateFrom, dateTo } = req.body;
+  const result = await createMission({ sponsorName, venueId, claimText, bonusPoints, radiusMeters, hashtagFilter, dateFrom, dateTo }, { db });
+  res.json(result);
+}));
+
+app.get('/api/missions/near-me', requireOnboarded, ah(async (req, res) => {
+  const result = await getMissionsNearUser({ userId: req.userId }, { db });
   res.json(result);
 }));
 
