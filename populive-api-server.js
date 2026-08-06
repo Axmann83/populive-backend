@@ -28,7 +28,7 @@ const { startScheduler } = require('./populive-scheduler');
 const {
   createProfile, setProfilePhoto, updateProfileDetails, completeOnboarding, requireCompletedOnboarding, getPublicProfile,
 } = require('./populive-profile-onboarding');
-const { generateVenueReport, getPopularVenuesNow, getVenueHistoricalCheckins } = require('./populive-venue-insights');
+const { generateVenueReport, getPopularVenuesNow, getVenueHistoricalCheckins, getCommissionsReport } = require('./populive-venue-insights');
 const { joinSquad } = require('./populive-connector-engine');
 const { getLocalRanking, getGlobalRanking, getUserRankingSummary, getWelcomeBackSummary } = require('./populive-ranking-queries');
 const { createMission, getAllMissions, getMissionsNearUser, completeMission, getMissionPreview } = require('./populive-missions-logic');
@@ -343,6 +343,20 @@ app.post('/api/dashboard/products/:productId/price', requireArchitect, ah(async 
     return res.json({ success: false, reason: 'invalid_price' });
   }
   await db.query(`UPDATE iap_products SET price_cents = $1 WHERE id = $2`, [priceCents, req.params.productId]);
+  res.json({ success: true });
+}));
+
+app.get('/api/dashboard/commissions', requireArchitect, ah(async (req, res) => {
+  const report = await getCommissionsReport({}, { db });
+  res.json({ success: true, report });
+}));
+
+app.post('/api/dashboard/venues/:venueId/commission', requireArchitect, ah(async (req, res) => {
+  const { commissionVenuePct } = req.body;
+  if (!Number.isInteger(commissionVenuePct) || commissionVenuePct < 0 || commissionVenuePct > 100) {
+    return res.json({ success: false, reason: 'invalid_percentage' });
+  }
+  await db.query(`UPDATE venues SET commission_venue_pct = $1 WHERE id = $2`, [commissionVenuePct, req.params.venueId]);
   res.json({ success: true });
 }));
 
