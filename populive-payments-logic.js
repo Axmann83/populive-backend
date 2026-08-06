@@ -109,6 +109,16 @@ async function initiatePulsePurchase({ senderId, receiverId, arenaSessionId, dri
   if (tier === 'super') {
     const check = await canSendDirectContact({ senderId, receiverId }, { db });
     if (!check.allowed) return { success: false, reason: check.reason };
+
+    // Un Pulse+Superlike richiede ANCHE un Superlike vero da spendere
+    // — controllo qui SUBITO (senza ancora scalarlo: lo faremo solo
+    // quando la Pulse nascerà per davvero, dentro createPulseRecord,
+    // per non perdere un Superlike se poi il pagamento del Pulse
+    // fallisce o viene abbandonato su Stripe).
+    const senderSuperlikes = await db.query(`SELECT superlike_balance FROM users WHERE id = $1`, [senderId]);
+    if (!senderSuperlikes || senderSuperlikes.superlike_balance <= 0) {
+      return { success: false, reason: 'superlike_balance_exhausted' };
+    }
   }
 
   // Il prezzo e il nome del drink vengono SEMPRE recuperati qui,
