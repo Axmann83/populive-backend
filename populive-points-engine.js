@@ -17,7 +17,8 @@ const BASE_POINTS = {
   like_received:             5,   // solo i primi N like/giorno per ricevente contano (rate limit già deciso)
   superlike_received:        8,
   pulse_standalone:          10,
-  pulse_like:                10,   // + bonus separato al DESTINATARIO se vince il minigioco (vedi GUESS_GAME_BONUS_POINTS)
+  pulse_like:                10,   // + bonus separato per ENTRAMBI se vince il minigioco (vedi pulse_like_match sotto)
+  pulse_like_match:          10,   // bonus al RICEVENTE per un match riuscito nel minigioco — +30% incluso via MULTIPLIERS.guess_match_bonus, si somma correttamente a eventuali altri bonus (Premium, Founder, ecc.)
   pulse_super:               12,
   mission_completed:        15,   // missione sponsorizzata da brand
   connector_discovery_bonus: 18,  // Top Connector: bonus per aver "scoperto" un profilo che poi esplode
@@ -33,11 +34,17 @@ const SENDER_POINTS = {
   pulse_standalone:     4,
   pulse_like:           4,
   pulse_super:          5,
+  pulse_like_match:    13,  // 10 base + 30% già incluso (questo percorso non passa dal motore dei moltiplicatori generico) — premia CHI HA INVIATO per il fatto che il ricevente ha giocato il minigioco fino in fondo invece di skipparlo, non solo il ricevente stesso.
 };
 
-// Bonus al DESTINATARIO se vince il minigioco Pulse+Like (è lui/lei
-// che gioca, quindi il bonus va a lui/lei, non a chi ha mandato la Pulse).
-const GUESS_GAME_BONUS_POINTS = 8;
+// Bonus a ENTRAMBI se il minigioco Pulse+Like va a segno (match) —
+// non solo al destinatario che gioca, come succedeva prima: chi ha
+// mandato la Pulse partecipa comunque al risultato del suo gesto.
+// Il +30% (rispetto ai 10 punti base) premia il fatto di NON aver
+// skippato il minigioco — un incentivo in più a giocarlo davvero.
+// (il vecchio valore fisso GUESS_GAME_BONUS_POINTS=8, solo per il
+// ricevente e fuori dal motore dei moltiplicatori, è stato sostituito
+// da questo — v. BASE_POINTS.pulse_like_match / SENDER_POINTS.pulse_like_match)
 
 // Tetto anti-spam sulle visite profilo: oltre le prime N persone
 // DIVERSE viste in una sessione, le visite continuano a funzionare
@@ -54,6 +61,7 @@ const MULTIPLIERS = {
   consent_per_toggle: 0.05, // +5% per ciascuna delle 3 scelte facoltative attive in Impostazioni (missioni sponsorizzate/bacheca storica/ricevi Pulse) — cumulabile fino a +15% con tutte e tre attive. Si applica SIA ai punti che ricevi SIA a quelli che guadagni inviando, ed è sempre calcolato al momento (mai "congelato"): se spunti o togli una casella, il moltiplicatore cambia dalla prossima interazione in poi, coerente con la sua natura reversibile.
   verified_bonus: 0.05, // +5% per chi ha il profilo Verificato — a differenza delle 3 scelte sopra, questo NON si accende/spegne mai (badge acquistato una volta), quindi si SOMMA in modo semplice sopra gli altri invece di moltiplicarsi insieme — su 10 punti base: 15% (tutte e 3 le scelte) + 5% (verificato) = 2 punti bonus totali, non 2,075. Vale meno proprio perché non è reversibile come le altre.
   historical_board_bonus: 1.3, // +30% sui punti guadagnati da un Superlike o una visita profilo che arrivano dalla Bacheca Storica — incentivo a comparire lì (consenso facoltativo appears_in_historical_search). Si applica SOLO a questi due source, moltiplicato in sequenza con gli altri (come premium), non sommato come il bonus Verificato — qui non c'è motivo di trattarlo diversamente, è calcolato per ogni singolo evento, non legato a uno stato permanente.
+  guess_match_bonus: 1.3, // +30% sui punti del RICEVENTE per un match riuscito nel minigioco Pulse+Like — premia chi lo gioca fino in fondo invece di skipparlo. Si applica SOLO al source pulse_like_match, moltiplicato in sequenza con gli altri come premium/historical_board_bonus.
 };
 
 // Limite specifico sul LIKE INVIATO (non ricevuto): solo i primi N
@@ -155,6 +163,12 @@ async function computePoints({ receiverId, source, senderId, arenaSessionId, via
     localPoints = Math.round(localPoints * MULTIPLIERS.historical_board_bonus);
   }
 
+  // Bonus match riuscito nel minigioco Pulse+Like — SOLO per questo
+  // source specifico, mai per altri.
+  if (source === 'pulse_like_match') {
+    localPoints = Math.round(localPoints * MULTIPLIERS.guess_match_bonus);
+  }
+
   // Bonus scelte facoltative — si applica per ultimo, sopra a tutti
   // gli altri moltiplicatori, sempre calcolato sulle impostazioni
   // ATTUALI di chi riceve.
@@ -253,4 +267,4 @@ async function hasAlreadyBoosted({ senderId, receiverId, source, arenaSessionId 
   return priorCount > 0;
 }
 
-module.exports = { BASE_POINTS, SENDER_POINTS, MULTIPLIERS, LIKE_SENDER_FREE_LIMIT, GUESS_GAME_BONUS_POINTS, MAX_DISTINCT_VIEWS_PER_SESSION, computePoints, awardPoints, awardSenderPoints, getConsentMultiplier };
+module.exports = { BASE_POINTS, SENDER_POINTS, MULTIPLIERS, LIKE_SENDER_FREE_LIMIT, MAX_DISTINCT_VIEWS_PER_SESSION, computePoints, awardPoints, awardSenderPoints, getConsentMultiplier };
