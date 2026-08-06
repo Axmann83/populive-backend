@@ -171,6 +171,19 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type, via
 
       io.to(`user_${senderId}`).emit('chat_unlocked', { withUserId: receiverId, conversationId: matchConversationId, viaReciprocalLike: true });
       io.to(`user_${receiverId}`).emit('chat_unlocked', { withUserId: senderId, conversationId: matchConversationId, viaReciprocalLike: true });
+
+      // Bonus punti a ENTRAMBI per il match — 5 punti fissi a testa,
+      // nessun +30% (a differenza del Pulse+Like, qui non c'è un
+      // minigioco da giocare o skippare, il match scatta da solo
+      // appena il secondo Like arriva). Chiamato per entrambe le
+      // persone coinvolte, ciascuna sul proprio lato (locale + globale
+      // per chi lo riceve tramite awardPoints, locale per chi lo
+      // "invia" tramite awardSenderPoints — qui però il concetto di
+      // "invio" non si applica in modo netto: entrambi hanno sia
+      // inviato che ricevuto un Like, quindi entrambi passano da
+      // awardPoints per la propria metà del match).
+      await awardPoints({ receiverId: senderId, arenaSessionId, source: 'like_match', senderId: receiverId }, { db, io });
+      await awardPoints({ receiverId, arenaSessionId, source: 'like_match', senderId }, { db, io });
     }
   }
 
