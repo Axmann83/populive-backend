@@ -10,7 +10,7 @@
  * ============================================================
  */
 
-const { awardPoints, awardSenderPoints, LIKE_SENDER_FREE_LIMIT, GUESS_GAME_BONUS_POINTS, MAX_DISTINCT_VIEWS_PER_SESSION } = require('./populive-points-engine');
+const { awardPoints, awardSenderPoints, LIKE_SENDER_FREE_LIMIT, MAX_DISTINCT_VIEWS_PER_SESSION } = require('./populive-points-engine');
 const { openChatConversation } = require('./populive-chat-logic');
 
 
@@ -662,29 +662,23 @@ async function attemptGuess({ pulseId, receiverId, guessedUserId }, { db, io }) 
     io.to(`user_${pulse.sender_id}`).emit('chat_unlocked', { pulseId, withUserId: receiverId, viaGuessGame: true, conversationId: chat.conversationId });
     io.to(`user_${receiverId}`).emit('chat_unlocked', { pulseId, withUserId: pulse.sender_id, viaGuessGame: true, conversationId: chat.conversationId });
 
-    // Bonus punti popolarità per aver vinto il minigioco — oltre al
-    // drink già garantito, e come "chance di ringraziamento" per chi
-    // ha inviato la Pulse (il match dà valore anche al suo gesto).
-    // NOTA: questo valore fisso NON passa dal motore dei moltiplicatori
-    // (è già un bonus a sé, non un punteggio "base" da moltiplicare)
-    // — se in futuro vorremo applicare anche qui i moltiplicatori,
-    // basterà cambiarlo in un source dedicato in BASE_POINTS.
-    await db.query(`
-      INSERT INTO points_ledger (user_id, arena_session_id, points, source)
-      VALUES ($1, $2, $3, 'pulse_guess_won')
-    `, [receiverId, pulse.arena_session_id, GUESS_GAME_BONUS_POINTS]);
+    // Bonus punti per un match riuscito — ora a ENTRAMBI (prima solo
+    // al ricevente), passando dal vero motore dei moltiplicatori
+    // (source dedicato pulse_like_match, +30% via
+    // MULTIPLIERS.guess_match_bonus) invece di un valore fisso a
+    // parte: si somma correttamente a eventuali altri bonus che
+    // ciascuno dei due potesse già avere (Premium, Founder, ecc.).
+    // awardPoints/awardSenderPoints emettono già da soli l'evento
+    // 'points_update' verso l'Arena — nessun broadcast manuale
+    // aggiuntivo necessario qui.
+    const matchResult = await awardPoints({
+      receiverId, arenaSessionId: pulse.arena_session_id, source: 'pulse_like_match', senderId: pulse.sender_id,
+    }, { db, io });
+    await awardSenderPoints({
+      senderId: pulse.sender_id, arenaSessionId: pulse.arena_session_id, source: 'pulse_like_match',
+    }, { db, io });
 
-    // Questo invece va condiviso con TUTTA l'Arena, non in privato —
-    // è l'evento che fa scorrere le posizioni sulla classifica live
-    // per chiunque la stia guardando in quel momento (l'effetto "+10"
-    // che sale sopra il nome, come nel prototipo del ranking).
-    io.to(`arena_${pulse.arena_session_id}`).emit('points_update', {
-      userId: receiverId,
-      points: GUESS_GAME_BONUS_POINTS,
-      source: 'pulse_guess_won',
-    });
-
-    return { success: true, matched: true, chatUnlocked: true, bonusPoints: GUESS_GAME_BONUS_POINTS };
+    return { success: true, matched: true, chatUnlocked: true, bonusPoints: matchResult.localPoints };
   }
   const remaining = pulse.guesses_remaining - 1;
   await db.query(`UPDATE pulses SET guesses_remaining = $1 WHERE id = $2`, [remaining, pulseId]);
