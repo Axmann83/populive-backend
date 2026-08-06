@@ -471,6 +471,22 @@ app.post('/api/venues/create', requireOnboarded, ah(async (req, res) => {
   res.json(result);
 }));
 
+app.get('/api/feature-flags', ah(async (req, res) => {
+  // Pubblico, senza login — l'app deve poter sapere cosa mostrare
+  // ancora prima che la persona faccia il login (es. nella
+  // schermata di ingresso stessa).
+  const flags = await db.queryAll(`SELECT feature_key, is_enabled FROM feature_flags`);
+  const map = {};
+  flags.forEach((f) => { map[f.feature_key] = f.is_enabled; });
+  res.json({ success: true, flags: map });
+}));
+
+app.post('/api/dashboard/feature-flags/:key', requireArchitect, ah(async (req, res) => {
+  const { isEnabled } = req.body;
+  await db.query(`UPDATE feature_flags SET is_enabled = $1 WHERE feature_key = $2`, [!!isEnabled, req.params.key]);
+  res.json({ success: true });
+}));
+
 app.get('/api/venues/popular-now', ah(async (req, res) => {
   const venues = await getPopularVenuesNow({}, { db });
   res.json({ success: true, venues });
