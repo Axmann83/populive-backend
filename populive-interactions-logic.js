@@ -466,11 +466,14 @@ async function createPulseRecord({ senderId, receiverId, arenaSessionId, drinkNa
   // "standalone" e "like" (resta il backend, tramite sender_id nel
   // database, a saperlo — il frontend riceve solo ciò che è coerente
   // con la variante scelta).
+  const superSenderProfile = tier === 'super' ? await getSenderProfile(senderId, { db }) : null;
   io.to(`user_${receiverId}`).emit('pulse_received', {
     pulseId: pulse.id,
     tier,
     drinkType: drinkName,
-    senderName: tier === 'super' ? (await getSenderProfile(senderId, { db })).displayName : null,
+    senderName: superSenderProfile?.displayName || null,
+    senderPhotoUrl: superSenderProfile?.photoUrl || null,
+    senderAvatarEmoji: superSenderProfile?.avatarEmoji || null,
   });
 
   return { success: true, pulseId: pulse.id };
