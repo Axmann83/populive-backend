@@ -92,9 +92,10 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type, via
     receiverLocalPoints = result.localPoints;
   }
 
-  await db.query(`
+  const newInteraction = await db.query(`
     INSERT INTO interactions (sender_id, receiver_id, arena_session_id, type, counts_for_points)
     VALUES ($1, $2, $3, $4, $5)
+    RETURNING id
   `, [senderId, receiverId, arenaSessionId, type, countsForPoints]);
 
   // Punti al MITTENTE: sia per Superlike che per Like, solo dentro
@@ -138,9 +139,13 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type, via
   // il mittente perché è la sua natura fin dall'inizio. Includiamo
   // anche i punti veri guadagnati, per il popup che li mostra
   // ovunque ci si trovi nell'app.
+  const senderProfile = type === 'superlike' ? await getSenderProfile(senderId, { db }) : null;
   io.to(`user_${receiverId}`).emit(type === 'superlike' ? 'superlike_received' : 'like_received', {
+    interactionId: newInteraction.id,
     senderId: type === 'superlike' ? senderId : null,
-    senderName: type === 'superlike' ? await getSenderName(senderId, { db }) : null,
+    senderName: senderProfile?.displayName || null,
+    senderPhotoUrl: senderProfile?.photoUrl || null,
+    senderAvatarEmoji: senderProfile?.avatarEmoji || null,
     countedForPoints: countsForPoints,
     points: receiverLocalPoints,
   });
@@ -456,15 +461,19 @@ async function createPulseRecord({ senderId, receiverId, arenaSessionId, drinkNa
     pulseId: pulse.id,
     tier,
     drinkType: drinkName,
-    senderName: tier === 'super' ? await getSenderName(senderId, { db }) : null,
+    senderName: tier === 'super' ? (await getSenderProfile(senderId, { db })).displayName : null,
   });
 
   return { success: true, pulseId: pulse.id };
 }
 
-async function getSenderName(senderId, { db }) {
-  const sender = await db.query(`SELECT display_name FROM users WHERE id = $1`, [senderId]);
-  return sender.display_name;
+async function getSenderProfile(senderId, { db }) {
+  const sender = await db.query(`SELECT display_name, photo_url, avatar_emoji FROM users WHERE id = $1`, [senderId]);
+  return {
+    displayName: sender.display_name,
+    photoUrl: sender.photo_url,
+    avatarEmoji: sender.avatar_emoji || '🙂',
+  };
 }
 
 // Regola di scaling concordata: profili mostrati nel mini-gioco e
