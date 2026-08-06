@@ -432,6 +432,15 @@ async function canSendDirectContact({ senderId, receiverId }, { db }) {
 // ------------------------------------------------------------
 async function createPulseRecord({ senderId, receiverId, arenaSessionId, drinkName, priceCents, tier, paymentStatus, stripeCheckoutSessionId }, { db, redis, io }) {
 
+  // Il Superlike allegato si scala SOLO qui — il momento vero in cui
+  // la Pulse nasce per davvero, indipendentemente da quale dei
+  // percorsi di pagamento l'ha portata fin qui (test/gratis/
+  // pre-pagato/Stripe). Il controllo "ce n'è almeno uno" era già
+  // stato fatto prima, qui lo consumiamo per davvero.
+  if (tier === 'super') {
+    await db.query(`UPDATE users SET superlike_balance = superlike_balance - 1 WHERE id = $1`, [senderId]);
+  }
+
   let guessesRemaining = null;
   if (tier === 'like') {
     guessesRemaining = await computeGuessAllowance(arenaSessionId, { redis });
