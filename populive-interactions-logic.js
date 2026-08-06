@@ -460,6 +460,18 @@ async function createPulseRecord({ senderId, receiverId, arenaSessionId, drinkNa
   // chi la riceve.
   await awardSenderPoints({ senderId, arenaSessionId, source: `pulse_${tier}` }, { db, io });
 
+  // Punti a chi RICEVE — sempre, al momento stesso della ricezione,
+  // indipendentemente da cosa deciderà dopo (accetta/rifiuta/lascia
+  // in sospeso). Prima erano legati solo all'accettazione, un'unica
+  // regola diversa rispetto a Like e Superlike (che danno sempre
+  // punti al ricevimento) — allineato su richiesta esplicita
+  // dell'utente: i punti misurano quanto sei notato, non quante
+  // interazioni accetti, ed evita ogni pressione sottile ad
+  // accettare "solo per convenienza".
+  await awardPoints({
+    receiverId, arenaSessionId, source: `pulse_${tier}`, senderId,
+  }, { db, io });
+
   // Notifica privata in tempo reale SOLO al destinatario — mai alla
   // stanza dell'Arena intera, questo è un evento personale.
   // Il payload NON include mai l'identità del mittente per i tier
@@ -549,16 +561,10 @@ async function respondToPulse({ pulseId, receiverId, action }, { db, io }) {
       WHERE id = $3
     `, [pulse.tier === 'super', redeemCode, pulseId]);
 
-    // Punti base per aver ricevuto la Pulse, qualunque sia il tier —
-    // passa dal motore centralizzato, così eventuali moltiplicatori
-    // (premium, founder, voto Top Connector) si applicano automaticamente
-    // qui come ovunque altro nel sistema.
-    await awardPoints({
-      receiverId,
-      arenaSessionId: pulse.arena_session_id,
-      source: `pulse_${pulse.tier}`,   // 'pulse_standalone' | 'pulse_like' | 'pulse_super'
-      senderId: pulse.sender_id,
-    }, { db, io });
+    // I punti per aver ricevuto la Pulse sono già stati assegnati al
+    // momento della ricezione vera (in createPulseRecord) — allineato
+    // a Like/Superlike, che danno sempre punti al ricevimento, mai
+    // legati alla decisione presa dopo. Qui non si riassegnano.
     // standalone → chat_unlocked resta false (nessun contatto, solo il drink)
     // super      → chat_unlocked true da subito (il profilo era già visibile)
     // like       → chat_unlocked resta false per ora: si sblocca SOLO
