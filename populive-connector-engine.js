@@ -247,16 +247,6 @@ async function getLocalPoints({ userId, arenaSessionId }, { db }) {
   return row.total || 0;
 }
 
-module.exports = {
-  joinSquad,
-  reflectPointsToConnector,
-  placeDiscoveryMarker,
-  evaluatePendingDiscoveryMarkers,
-  getConnectorStatus,
-  getSpenderStatus,
-  awardTableSpendingBonus,
-};
-
 /**
  * ============================================================
  * BONUS SPESA AL TAVOLO — soglia fissa, mai proporzionale
@@ -319,3 +309,54 @@ async function awardTableSpendingBonus({ arenaSessionId, tableQrCode, venueId, s
 
   return { success: true, membersRewarded: members.length, perPersonPoints };
 }
+
+
+/**
+ * ============================================================
+ * COLLEGAMENTO MANCANTE — chiamata dalla dashboard (fase pilota:
+ * un Architetto conferma a mano, dopo che PR/Concierge/bartender
+ * gli comunicano che un tavolo ha raggiunto la soglia). Prima
+ * questa funzione esisteva ma nessun endpoint la richiamava mai —
+ * il Big Spender non poteva scattare per nessuno.
+ * ============================================================
+ */
+
+/**
+ * Risolve da sola la sessione Arena "di stasera" per il locale
+ * indicato — chi conferma la spesa dalla dashboard non deve mai
+ * conoscere o inserire a mano un ID tecnico di sessione.
+ */
+async function awardTableSpendingBonusByVenue({ venueId, tableQrCode, spentCents }, { db, io }) {
+  const session = await db.query(`
+    SELECT id FROM arena_sessions
+    WHERE venue_id = $1 AND session_date = current_business_date($1)
+  `, [venueId]);
+
+  if (!session) return { success: false, reason: 'no_active_session_tonight' };
+
+  return awardTableSpendingBonus({ arenaSessionId: session.id, tableQrCode, venueId, spentCents }, { db, io });
+}
+
+/**
+ * Soglia e bonus punti — personalizzabili per locale dalla
+ * dashboard, mai un valore fisso uguale per tutti (da concordare
+ * con ogni proprietario in base al proprio listino).
+ */
+async function updateVenueSpendingConfig({ venueId, thresholdCents, bonusPoints }, { db }) {
+  await db.query(`
+    UPDATE venues SET spending_threshold_cents = $1, spending_bonus_points = $2 WHERE id = $3
+  `, [thresholdCents, bonusPoints, venueId]);
+  return { success: true };
+}
+
+module.exports = {
+  joinSquad,
+  reflectPointsToConnector,
+  placeDiscoveryMarker,
+  evaluatePendingDiscoveryMarkers,
+  getConnectorStatus,
+  getSpenderStatus,
+  awardTableSpendingBonus,
+  awardTableSpendingBonusByVenue,
+  updateVenueSpendingConfig,
+};
