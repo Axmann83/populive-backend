@@ -48,6 +48,64 @@ const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL || 'https://populive-fro
  * di COSA sta vendendo, lo legge dal catalogo.
  * ============================================================
  */
+
+/**
+ * ============================================================
+ * ACQUISTO CREDITI PULSE — prezzo PER LOCALE, non più globale
+ * ============================================================
+ * A differenza degli altri prodotti (Premium, Verificato, crediti
+ * Like/Superlike, sempre uguali per tutta la piattaforma), il
+ * prezzo di un credito Pulse dipende dall'accordo con QUEL locale
+ * specifico — vuoto finché gli Architetti non lo impostano dalla
+ * dashboard. Se è vuoto, l'acquisto semplicemente non è disponibile
+ * per quel locale, mai un prezzo finto o un valore di ripiego.
+ */
+async function initiateVenuePulseCreditsPurchase({ userId, venueId, quantity }, { db }) {
+  if (quantity !== 1 && quantity !== 5) {
+    return { success: false, reason: 'invalid_quantity' };
+  }
+
+  const venue = await db.query(`
+    SELECT name, pulse_price_cents, pulse_bundle_5_price_cents FROM venues WHERE id = $1
+  `, [venueId]);
+  if (!venue) return { success: false, reason: 'venue_not_found' };
+
+  const priceCents = quantity === 1 ? venue.pulse_price_cents : venue.pulse_bundle_5_price_cents;
+  if (!priceCents) {
+    return { success: false, reason: 'price_not_set_for_this_venue' };
+  }
+
+  const buyer = await db.query(`SELECT is_test_account FROM users WHERE id = $1`, [userId]);
+
+  // Account di prova: applica l'effetto subito, senza toccare Stripe.
+  if (buyer?.is_test_account) {
+    await db.query(`UPDATE users SET paid_pulse_credits = paid_pulse_credits + $1 WHERE id = $2`, [quantity, userId]);
+    return { success: true, freeOrTest: true };
+  }
+
+  const stripe = getStripeClient();
+  const session = await stripe.checkout.sessions.create({
+    mode: 'payment',
+    payment_method_types: ['card'],
+    line_items: [{
+      price_data: {
+        currency: 'eur',
+        product_data: { name: `${quantity} Pulse pre-pagati — ${venue.name}` },
+        unit_amount: priceCents,
+      },
+      quantity: 1,
+    }],
+    metadata: {
+      purchaseType: 'venue_pulse_credits', // distingue questo tipo di acquisto dagli altri due nel webhook
+      userId, venueId, quantity: String(quantity),
+    },
+    success_url: `${FRONTEND_BASE_URL}/?purchase_sent=1`,
+    cancel_url: `${FRONTEND_BASE_URL}/?purchase_cancelled=1`,
+  });
+
+  return { success: true, requiresPayment: true, checkoutUrl: session.url };
+}
+
 async function initiatePurchase({ userId, productId, arenaSessionId }, { db }) {
   const product = await db.query(`
     SELECT * FROM iap_products WHERE id = $1 AND is_active = true
@@ -231,6 +289,14 @@ async function handleStripeWebhook(rawBody, signature, { db, redis, io }) {
         arenaSessionId: m.arenaSessionId || null,
         externalTransactionId: session.id,
       }, { db });
+    } else if (m.purchaseType === 'venue_pulse_credits') {
+      // Acquisto di crediti Pulse a prezzo specifico del locale —
+      // la stessa identica riga di sempre, solo che il prezzo pagato
+      // (già verificato server-side al momento della creazione della
+      // sessione Stripe, mai qui) veniva dal locale, non dal catalogo.
+      await db.query(`
+        UPDATE users SET paid_pulse_credits = paid_pulse_credits + $1 WHERE id = $2
+      `, [parseInt(m.quantity), m.userId]);
     } else {
       // Acquisto di una Pulse (comportamento di sempre).
       await createPulseRecord({
@@ -249,4 +315,4 @@ async function handleStripeWebhook(rawBody, signature, { db, redis, io }) {
   return { statusCode: 200 };
 }
 
-module.exports = { initiatePulsePurchase, initiatePurchase, handleStripeWebhook };
+module.exports = { initiatePulsePurchase, initiatePurchase, initiateVenuePulseCreditsPurchase, handleStripeWebhook };
