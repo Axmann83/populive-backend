@@ -65,6 +65,11 @@ async function getLocalRanking({ arenaSessionId, hashtag, gender }, { db }) {
     ORDER BY local_points DESC
   `, params);
 
+  // Stesso interruttore condiviso ("Big Spender" in dashboard) — un
+  // solo controllo qui invece che dentro ogni riga della query.
+  const bigSpenderFlag = await db.query(`SELECT is_enabled FROM feature_flags WHERE feature_key = 'big_spender'`);
+  const bigSpenderEnabled = bigSpenderFlag ? bigSpenderFlag.is_enabled : true;
+
   return rows.map((r, i) => ({
     rank: i + 1,
     userId: r.user_id,
@@ -73,7 +78,7 @@ async function getLocalRanking({ arenaSessionId, hashtag, gender }, { db }) {
     photoUrl: r.photo_url,
     points: parseInt(r.local_points),
     isTopConnector: !!r.is_top_connector,
-    isTopSpender: !!r.is_top_spender,
+    isTopSpender: bigSpenderEnabled && !!r.is_top_spender,
   }));
 }
 
