@@ -269,4 +269,51 @@ async function getWelcomeBackSummary({ userId }, { db }) {
 }
 
 
-module.exports = { getLocalRanking, getGlobalRanking, getUserRankingSummary, getWelcomeBackSummary };
+/**
+ * ============================================================
+ * RICERCA PER HASHTAG — DASHBOARD ARCHITETTI
+ * ============================================================
+ * Estrae dalla classifica generale tutte le persone con un
+ * determinato hashtag (es. "pr"), ordinate per punti — pensata
+ * per fornire persone vere ai locali/brand che le richiedono (es.
+ * "ci servono PR bravi a muovere gente"). A differenza della
+ * classifica normale, include anche il numero di telefono — solo
+ * qui, solo per gli Architetti, solo per poter davvero contattare
+ * chi ha scelto di rendersi trovabile con quell'hashtag.
+ * ============================================================
+ */
+async function searchUsersByHashtag({ hashtag, limit = 50 }, { db }) {
+  const rows = await db.queryAll(`
+    SELECT
+      u.id AS user_id,
+      u.display_name,
+      u.phone_number,
+      u.photo_url,
+      u.avatar_emoji,
+      u.is_verified,
+      COALESCE(SUM(pl.points), 0) AS global_points,
+      COALESCE(bool_or(cs.is_top_connector), false) AS was_ever_top_connector
+    FROM users u
+    JOIN user_hashtags uh ON uh.user_id = u.id
+    JOIN hashtags h ON h.id = uh.hashtag_id AND LOWER(h.name) = LOWER($1)
+    LEFT JOIN points_ledger pl ON pl.user_id = u.id
+    LEFT JOIN connector_status cs ON cs.user_id = u.id
+    WHERE u.onboarding_completed = true
+    GROUP BY u.id, u.display_name, u.phone_number, u.photo_url, u.avatar_emoji, u.is_verified
+    ORDER BY global_points DESC
+    LIMIT $2
+  `, [hashtag.replace(/^#/, '').trim(), limit]);
+
+  return rows.map((r) => ({
+    userId: r.user_id,
+    displayName: r.display_name,
+    phoneNumber: r.phone_number,
+    photoUrl: r.photo_url,
+    avatarEmoji: r.avatar_emoji || '🙂',
+    isVerified: r.is_verified,
+    isTopConnector: !!r.was_ever_top_connector,
+    globalPoints: parseInt(r.global_points),
+  }));
+}
+
+module.exports = { getLocalRanking, getGlobalRanking, getUserRankingSummary, getWelcomeBackSummary, searchUsersByHashtag };
