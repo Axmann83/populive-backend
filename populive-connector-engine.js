@@ -48,7 +48,20 @@ async function recalculateTopSpenders(arenaSessionId, { db }) {
   `, [arenaSessionId, SPENDER_TOP_PERCENTILE]);
 }
 
+/**
+ * Un solo punto di verità per l'interruttore "Big Spender" —
+ * usato qui e negli altri due posti che calcolano isTopSpender
+ * (populive-profile-onboarding.js, populive-ranking-queries.js),
+ * così un solo interruttore in dashboard lo spegne ovunque nell'app
+ * senza dover toccare quei file uno per uno.
+ */
+async function isBigSpenderEnabled({ db }) {
+  const flag = await db.query(`SELECT is_enabled FROM feature_flags WHERE feature_key = 'big_spender'`);
+  return flag ? flag.is_enabled : true; // se manca la riga, di default acceso
+}
+
 async function getSpenderStatus({ userId, arenaSessionId }, { db }) {
+  if (!(await isBigSpenderEnabled({ db }))) return { isTopSpender: false };
   const row = await db.query(`
     SELECT is_top_spender FROM spender_status
     WHERE user_id = $1 AND arena_session_id = $2
@@ -261,6 +274,10 @@ async function getLocalPoints({ userId, arenaSessionId }, { db }) {
  * dashboard — mai un valore fisso uguale per tutti i locali.
  */
 async function awardTableSpendingBonus({ arenaSessionId, tableQrCode, venueId, spentCents }, { db, io }) {
+  if (!(await isBigSpenderEnabled({ db }))) {
+    return { success: false, reason: 'big_spender_disabled' };
+  }
+
   const venue = await db.query(`
     SELECT spending_threshold_cents, spending_bonus_points FROM venues WHERE id = $1
   `, [venueId]);
@@ -359,4 +376,5 @@ module.exports = {
   awardTableSpendingBonus,
   awardTableSpendingBonusByVenue,
   updateVenueSpendingConfig,
+  isBigSpenderEnabled,
 };
