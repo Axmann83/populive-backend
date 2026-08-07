@@ -389,24 +389,25 @@ async function getPeakConcurrentAttendance({ venueId, fromDate, toDate }, { db }
  * per centesimo.
  */
 async function getCommissionsReport({}, { db }) {
-  const referencePrice = await db.query(`
-    SELECT price_cents FROM iap_products WHERE sku = 'pulse_single_1' AND is_active = true
-  `);
-  const pricePerPulseCents = referencePrice?.price_cents || 0;
-
   const rows = await db.queryAll(`
     SELECT
-      v.id, v.name, v.commission_venue_pct,
+      v.id, v.name, v.commission_venue_pct, v.pulse_price_cents,
+      v.spending_threshold_cents, v.spending_bonus_points,
       COUNT(p.id) AS redeemed_count
     FROM venues v
     LEFT JOIN pulses p ON p.redeemed_venue_id = v.id AND p.status = 'redeemed'
     WHERE v.is_partner = true
-    GROUP BY v.id, v.name, v.commission_venue_pct
+    GROUP BY v.id, v.name, v.commission_venue_pct, v.pulse_price_cents, v.spending_threshold_cents, v.spending_bonus_points
     ORDER BY redeemed_count DESC
   `);
 
   return rows.map((r) => {
     const redeemedCount = parseInt(r.redeemed_count) || 0;
+    // Usa il prezzo VERO di questo locale (ora per-locale, non più
+    // un riferimento globale) — se il locale non ha ancora un
+    // prezzo impostato, l'importo resta 0, onestamente, non un
+    // numero inventato.
+    const pricePerPulseCents = r.pulse_price_cents || 0;
     const totalCents = redeemedCount * pricePerPulseCents;
     const venuePct = r.commission_venue_pct;
     const venueOwedCents = Math.round(totalCents * (venuePct / 100));
@@ -417,8 +418,51 @@ async function getCommissionsReport({}, { db }) {
       commissionVenuePct: venuePct,
       redeemedCount,
       venueOwedCents,
+      spendingThresholdCents: r.spending_threshold_cents,
+      spendingBonusPoints: r.spending_bonus_points,
     };
   });
+}
+
+/**
+ * Tutte le impostazioni di UN SOLO locale, in una chiamata sola —
+ * per il pannello "Organizza serata" della dashboard, che lavora
+ * su un locale alla volta invece che mostrarli tutti insieme.
+ */
+async function getVenueFullSettings({ venueId }, { db }) {
+  const v = await db.query(`
+    SELECT id, name, commission_venue_pct, pulse_price_cents, pulse_bundle_5_price_cents,
+           spending_threshold_cents, spending_bonus_points, default_open_time, default_close_time,
+           venue_type, is_partner
+    FROM venues WHERE id = $1
+  `, [venueId]);
+
+  if (!v) return { success: false, reason: 'venue_not_found' };
+
+  const redeemed = await db.query(`
+    SELECT COUNT(*) AS count FROM pulses WHERE redeemed_venue_id = $1 AND status = 'redeemed'
+  `, [venueId]);
+  const redeemedCount = parseInt(redeemed?.count) || 0;
+  const venueOwedCents = Math.round(redeemedCount * (v.pulse_price_cents || 0) * (v.commission_venue_pct / 100));
+
+  return {
+    success: true,
+    venue: {
+      venueId: v.id,
+      venueName: v.name,
+      venueType: v.venue_type,
+      isPartner: v.is_partner,
+      commissionVenuePct: v.commission_venue_pct,
+      pulsePriceCents: v.pulse_price_cents,
+      pulseBundle5PriceCents: v.pulse_bundle_5_price_cents,
+      spendingThresholdCents: v.spending_threshold_cents,
+      spendingBonusPoints: v.spending_bonus_points,
+      defaultOpenTime: v.default_open_time,
+      defaultCloseTime: v.default_close_time,
+      redeemedCount,
+      venueOwedCents,
+    },
+  };
 }
 
 
@@ -432,6 +476,7 @@ module.exports = {
   getReturnRate,
   getPeakConcurrentAttendance,
   getCommissionsReport,
+  getVenueFullSettings,
   generateVenueReport,
   getPopularVenuesNow,
   getVenueHistoricalCheckins,
