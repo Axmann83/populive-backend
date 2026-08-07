@@ -28,7 +28,7 @@ const { startScheduler } = require('./populive-scheduler');
 const {
   createProfile, setProfilePhoto, updateProfileDetails, completeOnboarding, requireCompletedOnboarding, getPublicProfile,
 } = require('./populive-profile-onboarding');
-const { generateVenueReport, getPopularVenuesNow, getVenueHistoricalCheckins, getCommissionsReport } = require('./populive-venue-insights');
+const { generateVenueReport, getPopularVenuesNow, getVenueHistoricalCheckins, getCommissionsReport, getVenueFullSettings } = require('./populive-venue-insights');
 const { joinSquad, awardTableSpendingBonusByVenue, updateVenueSpendingConfig } = require('./populive-connector-engine');
 const { getLocalRanking, getGlobalRanking, getUserRankingSummary, getWelcomeBackSummary, searchUsersByHashtag } = require('./populive-ranking-queries');
 const { createMission, getAllMissions, getMissionsNearUser, completeMission, getMissionPreview } = require('./populive-missions-logic');
@@ -368,6 +368,11 @@ app.post('/api/dashboard/award-table-spending', requireArchitect, ah(async (req,
     return res.json({ success: false, reason: 'invalid_values' });
   }
   const result = await awardTableSpendingBonusByVenue({ venueId, tableQrCode, spentCents }, deps);
+  res.json(result);
+}));
+
+app.get('/api/dashboard/venues/:venueId/full-settings', requireArchitect, ah(async (req, res) => {
+  const result = await getVenueFullSettings({ venueId: req.params.venueId }, { db });
   res.json(result);
 }));
 
