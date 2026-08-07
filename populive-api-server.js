@@ -22,14 +22,14 @@ const { handleCheckin, createVirtualVenue, getAllVenuesForMap } = require('./pop
 const {
   sendInteraction, trackProfileView, respondToPulse, attemptGuess, respondToSuperlike, getReceivedPulses, getPulseBalance,
 } = require('./populive-interactions-logic');
-const { initiatePulsePurchase, initiatePurchase, handleStripeWebhook } = require('./populive-payments-logic');
+const { initiatePulsePurchase, initiatePurchase, initiateVenuePulseCreditsPurchase, handleStripeWebhook } = require('./populive-payments-logic');
 const { sendMessage, getMessages, setChatKeepPreference } = require('./populive-chat-logic');
 const { startScheduler } = require('./populive-scheduler');
 const {
   createProfile, setProfilePhoto, updateProfileDetails, completeOnboarding, requireCompletedOnboarding, getPublicProfile,
 } = require('./populive-profile-onboarding');
 const { generateVenueReport, getPopularVenuesNow, getVenueHistoricalCheckins, getCommissionsReport } = require('./populive-venue-insights');
-const { joinSquad } = require('./populive-connector-engine');
+const { joinSquad, awardTableSpendingBonusByVenue, updateVenueSpendingConfig } = require('./populive-connector-engine');
 const { getLocalRanking, getGlobalRanking, getUserRankingSummary, getWelcomeBackSummary, searchUsersByHashtag } = require('./populive-ranking-queries');
 const { createMission, getAllMissions, getMissionsNearUser, completeMission, getMissionPreview } = require('./populive-missions-logic');
 const { requestOtp, verifyOtp, verifyToken } = require('./populive-auth-logic');
@@ -353,6 +353,24 @@ app.get('/api/dashboard/search-by-hashtag', requireArchitect, ah(async (req, res
   res.json({ success: true, people });
 }));
 
+app.post('/api/dashboard/venues/:venueId/spending-config', requireArchitect, ah(async (req, res) => {
+  const { thresholdCents, bonusPoints } = req.body;
+  if (!Number.isInteger(thresholdCents) || thresholdCents <= 0 || !Number.isInteger(bonusPoints) || bonusPoints <= 0) {
+    return res.json({ success: false, reason: 'invalid_values' });
+  }
+  const result = await updateVenueSpendingConfig({ venueId: req.params.venueId, thresholdCents, bonusPoints }, { db });
+  res.json(result);
+}));
+
+app.post('/api/dashboard/award-table-spending', requireArchitect, ah(async (req, res) => {
+  const { venueId, tableQrCode, spentCents } = req.body;
+  if (!venueId || !tableQrCode || !Number.isInteger(spentCents) || spentCents <= 0) {
+    return res.json({ success: false, reason: 'invalid_values' });
+  }
+  const result = await awardTableSpendingBonusByVenue({ venueId, tableQrCode, spentCents }, deps);
+  res.json(result);
+}));
+
 app.get('/api/dashboard/commissions', requireArchitect, ah(async (req, res) => {
   const report = await getCommissionsReport({}, { db });
   res.json({ success: true, report });
@@ -367,9 +385,49 @@ app.post('/api/dashboard/venues/:venueId/commission', requireArchitect, ah(async
   res.json({ success: true });
 }));
 
+app.post('/api/dashboard/venues/:venueId/pulse-prices', requireArchitect, ah(async (req, res) => {
+  const { singlePriceCents, bundle5PriceCents } = req.body;
+  // Entrambi facoltativi — un Architetto può impostare solo uno dei
+  // due se è quello che ha concordato con il locale, l'altro resta
+  // vuoto (null) finché non viene impostato a sua volta.
+  await db.query(`
+    UPDATE venues SET pulse_price_cents = $1, pulse_bundle_5_price_cents = $2 WHERE id = $3
+  `, [singlePriceCents || null, bundle5PriceCents || null, req.params.venueId]);
+  res.json({ success: true });
+}));
+
+app.post('/api/dashboard/venues/:venueId/arena-hours', requireArchitect, ah(async (req, res) => {
+  const { openTime, closeTime } = req.body;
+  if (!openTime || !closeTime) {
+    return res.json({ success: false, reason: 'both_times_required' });
+  }
+  await db.query(`
+    UPDATE venues SET default_open_time = $1, default_close_time = $2 WHERE id = $3
+  `, [openTime, closeTime, req.params.venueId]);
+  res.json({ success: true });
+}));
+
 app.post('/api/purchases/initiate', requireOnboarded, ah(async (req, res) => {
   const { productId, arenaSessionId } = req.body;
   const result = await initiatePurchase({ userId: req.userId, productId, arenaSessionId }, { db });
+  res.json(result);
+}));
+
+app.get('/api/venues/:venueId/pulse-prices', ah(async (req, res) => {
+  const venue = await db.query(`
+    SELECT pulse_price_cents, pulse_bundle_5_price_cents FROM venues WHERE id = $1
+  `, [req.params.venueId]);
+  if (!venue) return res.json({ success: false, reason: 'venue_not_found' });
+  res.json({
+    success: true,
+    singlePriceCents: venue.pulse_price_cents,
+    bundle5PriceCents: venue.pulse_bundle_5_price_cents,
+  });
+}));
+
+app.post('/api/venues/:venueId/pulse-credits/purchase', requireOnboarded, ah(async (req, res) => {
+  const { quantity } = req.body;
+  const result = await initiateVenuePulseCreditsPurchase({ userId: req.userId, venueId: req.params.venueId, quantity }, { db });
   res.json(result);
 }));
 
