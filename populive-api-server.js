@@ -30,7 +30,7 @@ const {
 } = require('./populive-profile-onboarding');
 const { generateVenueReport, getPopularVenuesNow, getVenueHistoricalCheckins, getCommissionsReport } = require('./populive-venue-insights');
 const { joinSquad } = require('./populive-connector-engine');
-const { getLocalRanking, getGlobalRanking, getUserRankingSummary, getWelcomeBackSummary } = require('./populive-ranking-queries');
+const { getLocalRanking, getGlobalRanking, getUserRankingSummary, getWelcomeBackSummary, searchUsersByHashtag } = require('./populive-ranking-queries');
 const { createMission, getAllMissions, getMissionsNearUser, completeMission, getMissionPreview } = require('./populive-missions-logic');
 const { requestOtp, verifyOtp, verifyToken } = require('./populive-auth-logic');
 
@@ -344,6 +344,13 @@ app.post('/api/dashboard/products/:productId/price', requireArchitect, ah(async 
   }
   await db.query(`UPDATE iap_products SET price_cents = $1 WHERE id = $2`, [priceCents, req.params.productId]);
   res.json({ success: true });
+}));
+
+app.get('/api/dashboard/search-by-hashtag', requireArchitect, ah(async (req, res) => {
+  const { hashtag } = req.query;
+  if (!hashtag) return res.json({ success: false, reason: 'hashtag_required' });
+  const people = await searchUsersByHashtag({ hashtag }, { db });
+  res.json({ success: true, people });
 }));
 
 app.get('/api/dashboard/commissions', requireArchitect, ah(async (req, res) => {
