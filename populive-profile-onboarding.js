@@ -237,7 +237,12 @@ async function getPublicProfile({ userId, arenaSessionId }, { db }) {
       SELECT is_top_spender FROM spender_status
       WHERE user_id = $1 AND arena_session_id = $2
     `, [userId, arenaSessionId]);
-    isTopSpender = !!spenderRow?.is_top_spender;
+    // Un solo interruttore ("Big Spender" in dashboard) spegne
+    // questo dato ovunque nell'app — controllato qui alla lettura,
+    // così funziona anche su dati vecchi già in tabella, non solo
+    // sulle nuove conferme.
+    const bigSpenderFlag = await db.query(`SELECT is_enabled FROM feature_flags WHERE feature_key = 'big_spender'`);
+    isTopSpender = (bigSpenderFlag ? bigSpenderFlag.is_enabled : true) && !!spenderRow?.is_top_spender;
   }
 
   const founderRow = await db.query(`SELECT 1 FROM founder_bracelets WHERE user_id = $1`, [userId]);
