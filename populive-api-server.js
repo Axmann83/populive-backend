@@ -27,6 +27,7 @@ const { sendMessage, getMessages, setChatKeepPreference } = require('./populive-
 const { startScheduler } = require('./populive-scheduler');
 const {
   createProfile, setProfilePhoto, updateProfileDetails, completeOnboarding, requireCompletedOnboarding, getPublicProfile,
+  findUserByPhone, setInstantInfluencerStatus,
 } = require('./populive-profile-onboarding');
 const { generateVenueReport, getPopularVenuesNow, getVenueHistoricalCheckins, getCommissionsReport, getVenueFullSettings } = require('./populive-venue-insights');
 const { joinSquad, awardTableSpendingBonusByVenue, updateVenueSpendingConfig } = require('./populive-connector-engine');
@@ -351,6 +352,19 @@ app.get('/api/dashboard/search-by-hashtag', requireArchitect, ah(async (req, res
   if (!hashtag) return res.json({ success: false, reason: 'hashtag_required' });
   const people = await searchUsersByHashtag({ hashtag }, { db });
   res.json({ success: true, people });
+}));
+
+app.get('/api/dashboard/find-user-by-phone', requireArchitect, ah(async (req, res) => {
+  const { phone } = req.query;
+  if (!phone) return res.json({ success: false, reason: 'phone_required' });
+  const result = await findUserByPhone({ phoneNumber: phone }, { db });
+  res.json(result);
+}));
+
+app.post('/api/dashboard/users/:userId/instant-influencer', requireArchitect, ah(async (req, res) => {
+  const { category, products } = req.body;
+  const result = await setInstantInfluencerStatus({ userId: req.params.userId, category, products }, { db });
+  res.json(result);
 }));
 
 app.post('/api/dashboard/venues/:venueId/spending-config', requireArchitect, ah(async (req, res) => {
