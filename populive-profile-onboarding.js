@@ -245,6 +245,16 @@ async function getPublicProfile({ userId, arenaSessionId }, { db }) {
     isTopSpender = (bigSpenderFlag ? bigSpenderFlag.is_enabled : true) && !!spenderRow?.is_top_spender;
   }
 
+  // Un solo interruttore ("Instant Influencer" in dashboard) spegne
+  // la pillola dorata ovunque nell'app — stesso principio già usato
+  // per il Big Spender: controllato qui alla lettura, così vale sia
+  // per la card nel Radar sia per il profilo completo, che passano
+  // entrambi da questa stessa funzione.
+  const instantInfluencerFlag = await db.query(`SELECT is_enabled FROM feature_flags WHERE feature_key = 'instant_influencer'`);
+  const instantInfluencerEnabled = instantInfluencerFlag ? instantInfluencerFlag.is_enabled : true;
+  const finalInstantInfluencerCategory = instantInfluencerEnabled ? (profile.instant_influencer_category || null) : null;
+  const finalSponsoredProducts = instantInfluencerEnabled ? sponsoredProducts : [];
+
   const founderRow = await db.query(`SELECT 1 FROM founder_bracelets WHERE user_id = $1`, [userId]);
 
   return {
@@ -263,8 +273,8 @@ async function getPublicProfile({ userId, arenaSessionId }, { db }) {
       isTopConnector,
       isTopSpender,
       isFounder: !!founderRow,
-      instantInfluencerCategory: profile.instant_influencer_category || null,
-      sponsoredProducts,
+      instantInfluencerCategory: finalInstantInfluencerCategory,
+      sponsoredProducts: finalSponsoredProducts,
     },
   };
 }
