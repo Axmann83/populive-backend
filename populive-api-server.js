@@ -703,7 +703,8 @@ app.get('/api/profile/:userId/settings', requireOnboarded, ah(async (req, res) =
   // a mano per leggere/scrivere le impostazioni di un altro.
   const user = await db.query(`
     SELECT show_ranking_on_profile, sponsored_missions_enabled,
-           appears_in_historical_search, receive_pulses_enabled, contact_filter
+           appears_in_historical_search, receive_pulses_enabled, contact_filter,
+           ghost_mode_enabled
     FROM users WHERE id = $1
   `, [req.userId]);
   if (!user) return res.json({ success: false, reason: 'user_not_found' });
@@ -716,6 +717,7 @@ app.get('/api/profile/:userId/settings', requireOnboarded, ah(async (req, res) =
       appearsInHistoricalSearch: user.appears_in_historical_search,
       receivePulsesEnabled: user.receive_pulses_enabled,
       contactFilter: user.contact_filter,
+      ghostModeEnabled: user.ghost_mode_enabled,
     },
   });
 }));
@@ -724,6 +726,7 @@ app.post('/api/profile/:userId/settings', requireOnboarded, ah(async (req, res) 
   const {
     showRankingOnProfile, sponsoredMissionsEnabled,
     appearsInHistoricalSearch, receivePulsesEnabled, contactFilter,
+    ghostModeEnabled,
   } = req.body;
 
   // Stessa protezione qui, ancora più importante: senza questo,
@@ -735,11 +738,13 @@ app.post('/api/profile/:userId/settings', requireOnboarded, ah(async (req, res) 
       sponsored_missions_enabled = $2,
       appears_in_historical_search = $3,
       receive_pulses_enabled = $4,
-      contact_filter = $5
-    WHERE id = $6
+      contact_filter = $5,
+      ghost_mode_enabled = $6
+    WHERE id = $7
   `, [
     showRankingOnProfile, sponsoredMissionsEnabled,
     appearsInHistoricalSearch, receivePulsesEnabled, contactFilter,
+    ghostModeEnabled,
     req.userId,
   ]);
 
