@@ -98,6 +98,17 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type, via
     RETURNING id
   `, [senderId, receiverId, arenaSessionId, type, countsForPoints]);
 
+  // GHOST MODE — se chi invia è un fantasma, questo è il momento in
+  // cui si "rivela" — ma SOLO nel radar di chi riceve, mai per il
+  // resto della stanza. Non cambia nulla nelle regole di anonimato
+  // già esistenti per Like/Superlike (quelle restano intatte) — qui
+  // stiamo solo dicendo al radar del destinatario "aggiungi questo
+  // profilo tra i candidati", come se fosse appena entrato.
+  const senderGhostRow = await db.query(`SELECT ghost_mode_enabled FROM users WHERE id = $1`, [senderId]);
+  if (senderGhostRow?.ghost_mode_enabled) {
+    io.to(`user_${receiverId}`).emit('ghost_revealed', { userId: senderId });
+  }
+
   // Punti al MITTENTE: sia per Superlike che per Like, solo dentro
   // un tetto gratuito — per il Like è per-Arena, per il Superlike è
   // SETTIMANALE (dato che il Superlike, mostrando sempre l'identità,
@@ -465,6 +476,16 @@ async function createPulseRecord({ senderId, receiverId, arenaSessionId, drinkNa
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
     RETURNING id
   `, [senderId, receiverId, arenaSessionId, drinkName, priceCents, tier, guessesRemaining, paymentStatus, stripeCheckoutSessionId || null]);
+
+  // GHOST MODE — stessa regola di Like/Superlike: se il mittente è
+  // un fantasma, si rivela SOLO nel radar di chi riceve la Pulse,
+  // qualunque sia la variante (anche standalone/+Like, che restano
+  // comunque anonime come interazione — qui parliamo solo di
+  // farlo comparire come profilo tra i candidati).
+  const pulseSenderGhostRow = await db.query(`SELECT ghost_mode_enabled FROM users WHERE id = $1`, [senderId]);
+  if (pulseSenderGhostRow?.ghost_mode_enabled) {
+    io.to(`user_${receiverId}`).emit('ghost_revealed', { userId: senderId });
+  }
 
   // Punti al mittente per l'invio stesso — piccolo incentivo per
   // aver compiuto l'azione, coerente con tutte le altre interazioni
