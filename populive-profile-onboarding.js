@@ -279,6 +279,78 @@ async function getPublicProfile({ userId, arenaSessionId }, { db }) {
   };
 }
 
+/**
+ * ============================================================
+ * INSTANT INFLUENCER — GESTIONE DA DASHBOARD
+ * ============================================================
+ * Prima si impostava tutto a mano su Supabase — ora dalla scheda
+ * Persone della dashboard, stesso miglioramento già fatto per le
+ * Missioni sponsorizzate. Resta comunque SOLO nelle mani degli
+ * Architetti (nessun pannello per l'utente stesso, serve un vero
+ * accordo brand da confermare a mano).
+ * ============================================================
+ */
+
+/**
+ * Trova un utente per numero di telefono — l'unico modo affidabile
+ * di identificare con certezza LA persona giusta a cui assegnare lo
+ * status (un nome potrebbe non essere univoco).
+ */
+async function findUserByPhone({ phoneNumber }, { db }) {
+  const cleaned = phoneNumber.replace(/[^\d+]/g, '');
+  const normalized = cleaned.startsWith('+') ? cleaned : cleaned.startsWith('39') ? `+${cleaned}` : `+39${cleaned}`;
+
+  const user = await db.query(`
+    SELECT id, display_name, photo_url, avatar_emoji, instant_influencer_category
+    FROM users WHERE phone_number = $1
+  `, [normalized]);
+
+  if (!user) return { success: false, reason: 'user_not_found' };
+
+  const productRows = await db.queryAll(`
+    SELECT id, product_name, product_url FROM instant_influencer_products
+    WHERE user_id = $1 ORDER BY sort_order ASC, created_at ASC
+  `, [user.id]);
+
+  return {
+    success: true,
+    user: {
+      userId: user.id,
+      displayName: user.display_name,
+      photoUrl: user.photo_url,
+      avatarEmoji: user.avatar_emoji || '🙂',
+      instantInfluencerCategory: user.instant_influencer_category,
+      products: productRows.map((p) => ({ name: p.product_name, url: p.product_url })),
+    },
+  };
+}
+
+/**
+ * Imposta categoria + prodotti sponsorizzati — sostituisce SEMPRE
+ * l'intera lista prodotti (più semplice e senza ambiguità che
+ * calcolare differenze riga per riga per un elenco così corto).
+ * Categoria vuota = toglie del tutto lo status (coerente con
+ * l'idea di un accordo che può anche finire).
+ */
+async function setInstantInfluencerStatus({ userId, category, products }, { db }) {
+  await db.query(`UPDATE users SET instant_influencer_category = $1 WHERE id = $2`, [category || null, userId]);
+
+  await db.query(`DELETE FROM instant_influencer_products WHERE user_id = $1`, [userId]);
+
+  if (category && products && products.length > 0) {
+    for (let i = 0; i < products.length; i++) {
+      const p = products[i];
+      if (!p.name?.trim()) continue;
+      await db.query(`
+        INSERT INTO instant_influencer_products (user_id, product_name, product_url, sort_order)
+        VALUES ($1, $2, $3, $4)
+      `, [userId, p.name.trim(), p.url?.trim() || null, i]);
+    }
+  }
+
+  return { success: true };
+}
+
 module.exports = {
   createProfile,
   setProfilePhoto,
@@ -287,4 +359,6 @@ module.exports = {
   completeOnboarding,
   requireCompletedOnboarding,
   getPublicProfile,
+  findUserByPhone,
+  setInstantInfluencerStatus,
 };
