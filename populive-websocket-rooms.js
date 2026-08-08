@@ -45,6 +45,17 @@ function setupWebSocket(httpServer, { redis, db }) {
       socket.data.userId = userId;
       socket.data.arenaSessionId = arenaSessionId;
 
+      // GHOST MODE — impostazione permanente del profilo, mai legata
+      // a una sola serata. Chi la attiva resta invisibile al resto
+      // del radar: niente avviso "è entrato" per gli altri, e più
+      // sotto viene tolto anche dall'istantanea che chiunque altro
+      // riceve. Torna visibile SOLO se invia lui stesso
+      // un'interazione a qualcuno (gestito in populive-interactions-logic.js,
+      // non qui).
+      const selfRow = await db.query(`SELECT ghost_mode_enabled FROM users WHERE id = $1`, [userId]);
+      const isGhost = !!selfRow?.ghost_mode_enabled;
+      socket.data.isGhost = isGhost;
+
       // Avvisiamo il resto della stanza che questa persona è entrata
       // nel radar "vivo" (distinto dal check-in stesso, che è già
       // stato gestito da handleCheckin — qui stiamo solo aprendo
@@ -56,10 +67,12 @@ function setupWebSocket(httpServer, { redis, db }) {
       // seconda scheda con lo stesso utente riceverebbe comunque
       // l'avviso "è entrato [tuo id]", facendoti comparire nel tuo
       // stesso radar. broadcastToOthers esclude per USERID vero.
-      broadcastToOthers(io, room, userId, 'presence_update', {
-        type: 'joined',
-        userId,
-      });
+      if (!isGhost) {
+        broadcastToOthers(io, room, userId, 'presence_update', {
+          type: 'joined',
+          userId,
+        });
+      }
 
       // IMPORTANTE — il pezzo che mancava: chi ENTRA ora deve anche
       // sapere chi c'era GIÀ prima di lui. socket.to(room) avvisa
@@ -76,11 +89,15 @@ function setupWebSocket(httpServer, { redis, db }) {
       // (se stessa) nel proprio radar, permettendole di toccarsi
       // da sola e mandarsi Like/Superlike/Pulse — un vero bug, non
       // solo un dettaglio estetico.
+      //
+      // Filtriamo ANCHE chi ha il Ghost Mode attivo — invisibile di
+      // default a chiunque, salvo la rivelazione mirata via
+      // interazione (evento a parte, mai qui).
       const existingSocketIds = io.sockets.adapter.rooms.get(room) || new Set();
       const existingUserIds = [];
       for (const socketId of existingSocketIds) {
         const otherSocket = io.sockets.sockets.get(socketId);
-        if (otherSocket?.data?.userId && otherSocket.data.userId !== userId) {
+        if (otherSocket?.data?.userId && otherSocket.data.userId !== userId && !otherSocket.data.isGhost) {
           existingUserIds.push(otherSocket.data.userId);
         }
       }
@@ -124,10 +141,17 @@ function setupWebSocket(httpServer, { redis, db }) {
       // collegata — utile per un radar accurato (es. per non mostrare
       // come "presente ora" chi ha già chiuso l'app), anche se il suo
       // check-in storico in Postgres resta comunque per sempre.
-      broadcastToOthers(io, room, userId, 'presence_update', {
-        type: 'left',
-        userId,
-      });
+      //
+      // Stessa regola del "joined": chi è in Ghost Mode non ha mai
+      // avvisato nessuno di essere entrato, quindi non ha senso
+      // avvisare che è uscito — nessuno stava "vedendo" la sua
+      // presenza da togliere.
+      if (!socket.data.isGhost) {
+        broadcastToOthers(io, room, userId, 'presence_update', {
+          type: 'left',
+          userId,
+        });
+      }
     });
 
     function leaveAllArenaRooms(socket) {
