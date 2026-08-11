@@ -321,4 +321,28 @@ async function searchUsersByHashtag({ hashtag, limit = 50 }, { db }) {
   }));
 }
 
-module.exports = { getLocalRanking, getGlobalRanking, getUserRankingSummary, getWelcomeBackSummary, searchUsersByHashtag };
+/**
+ * SOGLIA MINIMA PER LA CLASSIFICA LOCALE — separata apposta da
+ * getLocalRanking (che restituisce un semplice array, mai voluto
+ * mescolare le due forme di risposta). Sotto soglia, meglio nessuna
+ * classifica che una con una sola persona (demotivante) — ma questo
+ * NON tocca in nessun modo Radar, interazioni o punti, che restano
+ * identici (i punti vanno comunque alla classifica generale).
+ */
+async function checkLocalRankingThreshold({ arenaSessionId }, { db }) {
+  const venueRow = await db.query(`
+    SELECT v.min_users_for_local_ranking
+    FROM arena_sessions a JOIN venues v ON v.id = a.venue_id
+    WHERE a.id = $1
+  `, [arenaSessionId]);
+  const minRequired = venueRow?.min_users_for_local_ranking ?? 5;
+
+  const checkinCountRow = await db.query(`
+    SELECT COUNT(DISTINCT user_id) AS count FROM checkins WHERE arena_session_id = $1
+  `, [arenaSessionId]);
+  const currentCount = parseInt(checkinCountRow?.count) || 0;
+
+  return { belowThreshold: currentCount < minRequired, currentCount, minRequired };
+}
+
+module.exports = { getLocalRanking, getGlobalRanking, getUserRankingSummary, getWelcomeBackSummary, searchUsersByHashtag, checkLocalRankingThreshold };
