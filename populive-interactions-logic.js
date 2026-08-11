@@ -109,6 +109,18 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type, via
     io.to(`user_${receiverId}`).emit('ghost_revealed', { userId: senderId });
   }
 
+  // RIORDINO DEL RADAR — solo per il Like (resta anonimo, il
+  // destinatario non ha altro modo di sapere chi potrebbe averlo
+  // mandato se non lo vede tra i primi). Il Superlike non ne ha
+  // bisogno: mostra già subito chi è stato, tramite la sua stessa
+  // notifica. Non rivela nulla in più — se il mittente è già
+  // visibile normalmente nel radar del destinatario (non è un
+  // fantasma), questo evento dice solo "fallo comparire tra i
+  // primi", mai "eccoti chi ti ha messo like".
+  if (type === 'like') {
+    io.to(`user_${receiverId}`).emit('like_boost', { userId: senderId });
+  }
+
   // Punti al MITTENTE: sia per Superlike che per Like, solo dentro
   // un tetto gratuito — per il Like è per-Arena, per il Superlike è
   // SETTIMANALE (dato che il Superlike, mostrando sempre l'identità,
