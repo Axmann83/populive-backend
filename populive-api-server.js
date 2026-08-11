@@ -31,7 +31,7 @@ const {
 } = require('./populive-profile-onboarding');
 const { generateVenueReport, getPopularVenuesNow, getVenueHistoricalCheckins, getCommissionsReport, getVenueFullSettings } = require('./populive-venue-insights');
 const { joinSquad, awardTableSpendingBonusByVenue, updateVenueSpendingConfig } = require('./populive-connector-engine');
-const { getLocalRanking, getGlobalRanking, getUserRankingSummary, getWelcomeBackSummary, searchUsersByHashtag } = require('./populive-ranking-queries');
+const { getLocalRanking, getGlobalRanking, getUserRankingSummary, getWelcomeBackSummary, searchUsersByHashtag, checkLocalRankingThreshold } = require('./populive-ranking-queries');
 const { createMission, getAllMissions, getMissionsNearUser, completeMission, getMissionPreview } = require('./populive-missions-logic');
 const { requestOtp, verifyOtp, verifyToken } = require('./populive-auth-logic');
 
@@ -376,6 +376,15 @@ app.post('/api/dashboard/venues/:venueId/spending-config', requireArchitect, ah(
   res.json(result);
 }));
 
+app.post('/api/dashboard/venues/:venueId/ranking-threshold', requireArchitect, ah(async (req, res) => {
+  const { minUsers } = req.body;
+  if (!Number.isInteger(minUsers) || minUsers < 1) {
+    return res.json({ success: false, reason: 'invalid_value' });
+  }
+  await db.query(`UPDATE venues SET min_users_for_local_ranking = $1 WHERE id = $2`, [minUsers, req.params.venueId]);
+  res.json({ success: true });
+}));
+
 app.post('/api/dashboard/award-table-spending', requireArchitect, ah(async (req, res) => {
   const { venueId, tableQrCode, spentCents } = req.body;
   if (!venueId || !tableQrCode || !Number.isInteger(spentCents) || spentCents <= 0) {
@@ -505,8 +514,12 @@ app.post('/api/table/join', requireOnboarded, ah(async (req, res) => {
 // ------------------------------------------------------------
 app.get('/api/arenas/:arenaSessionId/ranking', ah(async (req, res) => {
   const { hashtag, gender } = req.query;
+  const threshold = await checkLocalRankingThreshold({ arenaSessionId: req.params.arenaSessionId }, { db });
+  if (threshold.belowThreshold) {
+    return res.json({ success: true, belowThreshold: true, currentCount: threshold.currentCount, minRequired: threshold.minRequired, ranking: [] });
+  }
   const ranking = await getLocalRanking({ arenaSessionId: req.params.arenaSessionId, hashtag, gender }, { db });
-  res.json({ success: true, ranking });
+  res.json({ success: true, belowThreshold: false, ranking });
 }));
 
 app.get('/api/ranking/global', ah(async (req, res) => {
@@ -550,8 +563,8 @@ app.get('/api/venues/map', ah(async (req, res) => {
 }));
 
 app.post('/api/venues/create', requireOnboarded, ah(async (req, res) => {
-  const { name, area, latitude, longitude, venueType } = req.body;
-  const result = await createVirtualVenue({ name, area, latitude, longitude, venueType }, { db });
+  const { name, area, latitude, longitude, venueType, minUsersForLocalRanking } = req.body;
+  const result = await createVirtualVenue({ name, area, latitude, longitude, venueType, minUsersForLocalRanking }, { db });
   res.json(result);
 }));
 
