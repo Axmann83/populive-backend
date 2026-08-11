@@ -191,7 +191,7 @@ const VIRTUAL_VENUE_DEFAULTS = {
   retail:       { openTime: '09:00:00', closeTime: '20:00:00', checkinThreshold: 10 },
 };
 
-async function createVirtualVenue({ name, area, latitude, longitude, venueType }, { db }) {
+async function createVirtualVenue({ name, area, latitude, longitude, venueType, minUsersForLocalRanking }, { db }) {
   const defaults = VIRTUAL_VENUE_DEFAULTS[venueType];
   if (!defaults) return { success: false, reason: 'invalid_venue_type' };
   if (!name || !name.trim()) return { success: false, reason: 'name_required' };
@@ -199,11 +199,19 @@ async function createVirtualVenue({ name, area, latitude, longitude, venueType }
     return { success: false, reason: 'invalid_coordinates' };
   }
 
+  // Soglia minima per la classifica locale — facoltativa: se chi
+  // crea il locale non ufficiale non la specifica, usiamo lo stesso
+  // valore di default della colonna (5), risolto qui in JavaScript
+  // perché DEFAULT non è utilizzabile dentro un COALESCE in SQL.
+  const minUsers = Number.isInteger(minUsersForLocalRanking) && minUsersForLocalRanking >= 1
+    ? minUsersForLocalRanking
+    : 5;
+
   const venue = await db.query(`
-    INSERT INTO venues (name, area, latitude, longitude, checkin_threshold, is_partner, venue_type, default_open_time, default_close_time)
-    VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8)
+    INSERT INTO venues (name, area, latitude, longitude, checkin_threshold, is_partner, venue_type, default_open_time, default_close_time, min_users_for_local_ranking)
+    VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8, $9)
     RETURNING id
-  `, [name.trim(), area || null, latitude, longitude, defaults.checkinThreshold, venueType, defaults.openTime, defaults.closeTime]);
+  `, [name.trim(), area || null, latitude, longitude, defaults.checkinThreshold, venueType, defaults.openTime, defaults.closeTime, minUsers]);
 
   return { success: true, venueId: venue.id };
 }
