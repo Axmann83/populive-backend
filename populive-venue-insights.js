@@ -433,7 +433,7 @@ async function getVenueFullSettings({ venueId }, { db }) {
   const v = await db.query(`
     SELECT id, name, commission_venue_pct, pulse_price_cents, pulse_bundle_5_price_cents,
            spending_threshold_cents, spending_bonus_points, default_open_time, default_close_time,
-           venue_type, is_partner
+           venue_type, is_partner, min_users_for_local_ranking
     FROM venues WHERE id = $1
   `, [venueId]);
 
@@ -457,6 +457,7 @@ async function getVenueFullSettings({ venueId }, { db }) {
       pulseBundle5PriceCents: v.pulse_bundle_5_price_cents,
       spendingThresholdCents: v.spending_threshold_cents,
       spendingBonusPoints: v.spending_bonus_points,
+      minUsersForLocalRanking: v.min_users_for_local_ranking,
       defaultOpenTime: v.default_open_time,
       defaultCloseTime: v.default_close_time,
       redeemedCount,
