@@ -16,17 +16,20 @@
  *   1) Gli account Twilio in prova possono mandare SOLO messaggi
  *      con un testo tra quelli predefiniti — Verify è pensato
  *      apposta per i codici di verifica e include già il modello
- *      giusto.
+ *      giusto, mentre un messaggio scritto a mano da noi non era
+ *      permesso in prova.
  *   2) Bonus: Twilio ora gestisce lui stesso generazione, scadenza
  *      e tentativi del codice — non ci serve più una tabella
- *      nostra (otp_codes) per tenerne traccia.
+ *      nostra (otp_codes) per tenerne traccia, il codice è più
+ *      semplice e ha meno cose che possono andare storte.
  * ============================================================
  */
 
 const jwt = require('jsonwebtoken');
 const twilio = require('twilio');
 
-const JWT_EXPIRY = '30d';
+const JWT_EXPIRY = '30d'; // sessione lunga: un'app di nightlife non deve chiedere
+                           // di rifare login ogni pochi giorni
 
 function getTwilioClient() {
   return twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
@@ -34,7 +37,9 @@ function getTwilioClient() {
 
 /**
  * STEP 1 — L'utente inserisce il numero, Twilio Verify genera e
- * manda lui stesso il codice via SMS.
+ * manda lui stesso il codice via SMS (col suo modello predefinito,
+ * utilizzabile anche in prova). Non creiamo ancora nessun utente
+ * qui: quello avviene solo dopo la verifica.
  */
 async function requestOtp({ phoneNumber }, { db }) {
   const normalizedPhone = normalizePhoneNumber(phoneNumber);
@@ -46,6 +51,9 @@ async function requestOtp({ phoneNumber }, { db }) {
       .services(process.env.TWILIO_VERIFY_SERVICE_SID)
       .verifications.create({ to: normalizedPhone, channel: 'sms' });
   } catch (err) {
+    // Se l'SMS non parte per davvero (es. numero non verificato in
+    // un account ancora in prova), non ha senso dire all'utente
+    // "controlla il telefono" — meglio un errore chiaro subito.
     console.error('[auth] invio SMS fallito:', err);
     return { success: false, reason: 'sms_send_failed' };
   }
@@ -54,7 +62,10 @@ async function requestOtp({ phoneNumber }, { db }) {
 }
 
 /**
- * STEP 2 — L'utente inserisce il codice ricevuto.
+ * STEP 2 — L'utente inserisce il codice ricevuto. Chiediamo a
+ * Twilio se è corretto (lui solo sa qual è, generato e scaduto
+ * tutto dal suo lato) — se sì, troviamo o creiamo l'utente legato
+ * a quel numero, e rilasciamo un token di sessione (JWT).
  *
  * NOTA TECNICA IMPORTANTE: qui chiamiamo l'indirizzo di Twilio
  * DIRETTAMENTE (con una richiesta HTTP semplice), invece di usare
@@ -63,8 +74,8 @@ async function requestOtp({ phoneNumber }, { db }) {
  * Quel metodo ha un bug noto e documentato (mai risolto del tutto,
  * segnalato più volte su GitHub) che a volte fa credere che la
  * richiesta sia fallita anche quando Twilio ha verificato il
- * codice correttamente. Chiamare l'indirizzo direttamente evita
- * del tutto quel bug.
+ * codice correttamente — scoperto proprio testando questo sistema.
+ * Chiamare l'indirizzo direttamente evita del tutto quel bug.
  */
 async function verifyOtp({ phoneNumber, code }, { db }) {
   const normalizedPhone = normalizePhoneNumber(phoneNumber);
@@ -101,6 +112,10 @@ async function verifyOtp({ phoneNumber, code }, { db }) {
     return { success: false, reason: 'wrong_code' };
   }
 
+  // Troviamo l'utente esistente legato a questo numero, o ne
+  // creiamo uno nuovo "vuoto" — il resto del profilo (nome, foto,
+  // hashtag, consenso) si completa nel flusso di onboarding già
+  // scritto, che parte subito dopo il login per chi è nuovo.
   let user = await db.query(`SELECT id, onboarding_completed FROM users WHERE phone_number = $1`, [normalizedPhone]);
 
   let isNewUser = false;
@@ -124,6 +139,13 @@ async function verifyOtp({ phoneNumber, code }, { db }) {
   };
 }
 
+/**
+ * Verifica il token su ogni richiesta — sostituisce il vecchio
+ * "requireOnboarded" che si fidava ciecamente dell'header. Ora
+ * l'unico modo di "essere" un utente è avere un token che il
+ * server ha firmato lui stesso, impossibile da falsificare senza
+ * conoscere JWT_SECRET.
+ */
 function verifyToken(token) {
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
@@ -133,10 +155,24 @@ function verifyToken(token) {
   }
 }
 
+/**
+ * Normalizza il numero in formato internazionale (E.164, es.
+ * +393331234567) — Twilio lo richiede in questo formato esatto.
+ * Molto semplice apposta: per l'MVP assumiamo prefisso italiano
+ * se l'utente non lo scrive, da raffinare quando servirà davvero
+ * supportare altri paesi.
+ */
 function normalizePhoneNumber(raw) {
   if (!raw) return null;
   const cleaned = raw.replace(/[^\d+]/g, '');
   if (cleaned.startsWith('+')) return cleaned;
+  // Convenzione "00" internazionale (es. "0039 389 4381164") —
+  // molto comune in Italia al posto del "+39". Senza questo
+  // controllo, il codice sotto non la riconosce né come "+" né
+  // come "39 seguito dal numero", e finisce per AGGIUNGERE un
+  // secondo prefisso davanti (bug vero, trovato nei log reali:
+  // un numero digitato così diventava +3900393894381164).
+  if (cleaned.startsWith('0039')) return `+39${cleaned.slice(4)}`;
   if (cleaned.startsWith('39')) return `+${cleaned}`;
   return `+39${cleaned}`;
 }
