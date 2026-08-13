@@ -467,6 +467,80 @@ async function getVenueFullSettings({ venueId }, { db }) {
 }
 
 
+/**
+ * ============================================================
+ * CATALOGO DRINK PER LOCALE — GESTIONE DA DASHBOARD
+ * ============================================================
+ * Prima non esisteva NESSUN modo di popolarlo se non a mano su
+ * Supabase — scoperto durante un test dal vivo (il bottone "Invia
+ * Pulse" restava bloccato, catalogo sempre vuoto per ogni locale).
+ * Ogni drink è creato "di sua proprietà" per un locale specifico
+ * (mai condiviso tra locali diversi) — più semplice da gestire,
+ * niente da coordinare se un Architetto modifica il prezzo di un
+ * drink che in teoria appartiene anche a un altro locale.
+ * ============================================================
+ */
+
+async function getVenueDrinks({ venueId }, { db }) {
+  const rows = await db.queryAll(`
+    SELECT dp.id, dp.name, dp.base_price_cents, dp.is_active
+    FROM venue_drink_catalog vdc
+    JOIN drink_products dp ON dp.id = vdc.drink_product_id
+    WHERE vdc.venue_id = $1
+    ORDER BY dp.created_at ASC
+  `, [venueId]);
+
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    basePriceCents: r.base_price_cents,
+    isActive: r.is_active,
+  }));
+}
+
+async function addVenueDrink({ venueId, name, basePriceCents }, { db }) {
+  if (!name || !name.trim()) return { success: false, reason: 'name_required' };
+  if (!Number.isInteger(basePriceCents) || basePriceCents <= 0) {
+    return { success: false, reason: 'invalid_price' };
+  }
+
+  const drink = await db.query(`
+    INSERT INTO drink_products (name, base_price_cents, is_active)
+    VALUES ($1, $2, true)
+    RETURNING id
+  `, [name.trim(), basePriceCents]);
+
+  await db.query(`
+    INSERT INTO venue_drink_catalog (venue_id, drink_product_id)
+    VALUES ($1, $2)
+  `, [venueId, drink.id]);
+
+  return { success: true, drinkId: drink.id };
+}
+
+async function updateVenueDrink({ drinkProductId, name, basePriceCents }, { db }) {
+  if (!name || !name.trim()) return { success: false, reason: 'name_required' };
+  if (!Number.isInteger(basePriceCents) || basePriceCents <= 0) {
+    return { success: false, reason: 'invalid_price' };
+  }
+
+  await db.query(`
+    UPDATE drink_products SET name = $1, base_price_cents = $2 WHERE id = $3
+  `, [name.trim(), basePriceCents, drinkProductId]);
+
+  return { success: true };
+}
+
+async function removeVenueDrink({ venueId, drinkProductId }, { db }) {
+  // Il collegamento va tolto PRIMA del drink stesso — niente
+  // eliminazione automatica a cascata su questa tabella, quindi
+  // l'ordine conta (il vincolo di chiave esterna rifiuterebbe la
+  // seconda riga se restasse ancora agganciata).
+  await db.query(`DELETE FROM venue_drink_catalog WHERE venue_id = $1 AND drink_product_id = $2`, [venueId, drinkProductId]);
+  await db.query(`DELETE FROM drink_products WHERE id = $1`, [drinkProductId]);
+  return { success: true };
+}
+
 module.exports = {
   MIN_SAMPLE_SIZE,
   getArrivalTimeDistribution,
@@ -481,4 +555,8 @@ module.exports = {
   generateVenueReport,
   getPopularVenuesNow,
   getVenueHistoricalCheckins,
+  getVenueDrinks,
+  addVenueDrink,
+  updateVenueDrink,
+  removeVenueDrink,
 };
