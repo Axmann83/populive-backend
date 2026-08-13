@@ -23,7 +23,7 @@ const {
   sendInteraction, trackProfileView, respondToPulse, attemptGuess, respondToSuperlike, getReceivedPulses, getPulseBalance,
 } = require('./populive-interactions-logic');
 const { initiatePulsePurchase, initiatePurchase, initiateVenuePulseCreditsPurchase, handleStripeWebhook } = require('./populive-payments-logic');
-const { sendMessage, getMessages, setChatKeepPreference } = require('./populive-chat-logic');
+const { sendMessage, getMessages, setChatKeepPreference, getMyActiveConversations } = require('./populive-chat-logic');
 const { startScheduler } = require('./populive-scheduler');
 const {
   createProfile, setProfilePhoto, updateProfileDetails, completeOnboarding, requireCompletedOnboarding, getPublicProfile,
@@ -723,6 +723,11 @@ app.post('/api/chat/:conversationId/messages', requireOnboarded, ah(async (req, 
     conversationId: req.params.conversationId, senderId: req.userId, body,
   }, deps);
   res.json(result);
+}));
+
+app.get('/api/users/:userId/active-chats', requireOnboarded, ah(async (req, res) => {
+  const conversations = await getMyActiveConversations({ userId: req.params.userId }, deps);
+  res.json({ success: true, conversations });
 }));
 
 app.get('/api/chat/:conversationId/messages', requireOnboarded, ah(async (req, res) => {
