@@ -186,4 +186,27 @@ async function purgeExpiredChatMessages({ db }) {
   return { purged: true };
 }
 
-module.exports = { openChatConversation, sendMessage, getMessages, closeConversationsForSession, setChatKeepPreference, purgeExpiredChatMessages };
+/**
+ * Tutte le conversazioni ANCORA ACCESSIBILI per questa persona in
+ * questo momento — letta sempre fresca dal database vero, mai dalla
+ * sola memoria del telefono. Risolve un problema reale: prima non
+ * esisteva NESSUN modo di ritrovare una chat dopo un aggiornamento
+ * della pagina, anche se "Conserva" era stato scelto da entrambi —
+ * lo stato di "quale chat ho aperto" viveva solo nella sessione del
+ * browser, sparendo ad ogni refresh.
+ */
+async function getMyActiveConversations({ userId }, { db }) {
+  const rows = await db.queryAll(`
+    SELECT id, user_a_id, user_b_id
+    FROM chat_conversations
+    WHERE (user_a_id = $1 OR user_b_id = $1) AND closed_at IS NULL
+    ORDER BY created_at DESC
+  `, [userId]);
+
+  return rows.map((r) => ({
+    conversationId: r.id,
+    withUserId: r.user_a_id === userId ? r.user_b_id : r.user_a_id,
+  }));
+}
+
+module.exports = { openChatConversation, sendMessage, getMessages, closeConversationsForSession, setChatKeepPreference, purgeExpiredChatMessages, getMyActiveConversations };
