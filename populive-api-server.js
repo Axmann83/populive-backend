@@ -29,7 +29,7 @@ const {
   createProfile, setProfilePhoto, updateProfileDetails, completeOnboarding, requireCompletedOnboarding, getPublicProfile,
   findUserByPhone, setInstantInfluencerStatus,
 } = require('./populive-profile-onboarding');
-const { generateVenueReport, getPopularVenuesNow, getVenueHistoricalCheckins, getCommissionsReport, getVenueFullSettings } = require('./populive-venue-insights');
+const { generateVenueReport, getPopularVenuesNow, getVenueHistoricalCheckins, getCommissionsReport, getVenueFullSettings, getVenueDrinks, addVenueDrink, updateVenueDrink, removeVenueDrink } = require('./populive-venue-insights');
 const { joinSquad, awardTableSpendingBonusByVenue, updateVenueSpendingConfig } = require('./populive-connector-engine');
 const { getLocalRanking, getGlobalRanking, getUserRankingSummary, getWelcomeBackSummary, searchUsersByHashtag, checkLocalRankingThreshold } = require('./populive-ranking-queries');
 const { createMission, getAllMissions, getMissionsNearUser, completeMission, getMissionPreview } = require('./populive-missions-logic');
@@ -383,6 +383,28 @@ app.post('/api/dashboard/venues/:venueId/ranking-threshold', requireArchitect, a
   }
   await db.query(`UPDATE venues SET min_users_for_local_ranking = $1 WHERE id = $2`, [minUsers, req.params.venueId]);
   res.json({ success: true });
+}));
+
+app.get('/api/dashboard/venues/:venueId/drinks', requireArchitect, ah(async (req, res) => {
+  const drinks = await getVenueDrinks({ venueId: req.params.venueId }, { db });
+  res.json({ success: true, drinks });
+}));
+
+app.post('/api/dashboard/venues/:venueId/drinks', requireArchitect, ah(async (req, res) => {
+  const { name, basePriceCents } = req.body;
+  const result = await addVenueDrink({ venueId: req.params.venueId, name, basePriceCents }, { db });
+  res.json(result);
+}));
+
+app.put('/api/dashboard/drinks/:drinkId', requireArchitect, ah(async (req, res) => {
+  const { name, basePriceCents } = req.body;
+  const result = await updateVenueDrink({ drinkProductId: req.params.drinkId, name, basePriceCents }, { db });
+  res.json(result);
+}));
+
+app.delete('/api/dashboard/venues/:venueId/drinks/:drinkId', requireArchitect, ah(async (req, res) => {
+  const result = await removeVenueDrink({ venueId: req.params.venueId, drinkProductId: req.params.drinkId }, { db });
+  res.json(result);
 }));
 
 app.post('/api/dashboard/award-table-spending', requireArchitect, ah(async (req, res) => {
