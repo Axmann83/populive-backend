@@ -230,10 +230,26 @@ async function getUserRankingSummary({ userId, arenaSessionId, viewerId }, { db 
  * ============================================================
  */
 async function getWelcomeBackSummary({ userId }, { db }) {
-  const user = await db.query(`SELECT last_seen_at FROM users WHERE id = $1`, [userId]);
-  if (!user) return { success: false, reason: 'user_not_found' };
+  // Lettura e aggiornamento in UN SOLO passaggio bloccato (FOR
+  // UPDATE) — non due passaggi separati come prima. Con due
+  // passaggi, due richieste quasi simultanee (es. più aggiornamenti
+  // di pagina ravvicinati, capitato davvero in un test) potevano
+  // entrambe leggere la STESSA "ultima visita" prima che la prima
+  // avesse fatto in tempo ad aggiornarla — mostrando così due volte
+  // di fila lo stesso riepilogo, invece che una volta sola. Con il
+  // blocco vero, la seconda richiesta aspetta che la prima finisca
+  // e poi legge il valore già aggiornato, coerente con quanto ha
+  // già mostrato la prima.
+  const result = await db.query(`
+    UPDATE users AS u
+    SET last_seen_at = now()
+    FROM (SELECT last_seen_at FROM users WHERE id = $1 FOR UPDATE) AS old
+    WHERE u.id = $1
+    RETURNING old.last_seen_at AS previous_last_seen_at
+  `, [userId]);
+  if (!result) return { success: false, reason: 'user_not_found' };
 
-  const since = user.last_seen_at;
+  const since = result.previous_last_seen_at;
 
   const pointsRow = await db.query(`
     SELECT COALESCE(SUM(points), 0) AS total FROM points_ledger
@@ -255,11 +271,6 @@ async function getWelcomeBackSummary({ userId }, { db }) {
     SELECT COUNT(*) FROM pulses
     WHERE receiver_id = $1 AND created_at > $2
   `, [userId, since]);
-
-  // Aggiorniamo ORA, non prima di aver letto tutto — altrimenti il
-  // confronto sopra userebbe già il nuovo timestamp invece di quello
-  // vero dell'ultima visita.
-  await db.query(`UPDATE users SET last_seen_at = now() WHERE id = $1`, [userId]);
 
   const hasNews = pointsEarned > 0 || newLikes > 0 || newSuperlikes > 0 || newPulses > 0;
 
