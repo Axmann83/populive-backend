@@ -39,9 +39,35 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type, via
     return { success: false, reason: 'historical_board_superlike_only' };
   }
 
-  const blocked = await db.query(`
-    SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2
-  `, [receiverId, senderId]);
+  // Recuperato PRESTO apposta — serve sia per il controllo dei
+  // blocchi qui sotto sia per quello dei doppioni più avanti.
+  // Un account di prova non ha MAI nessuno di questi limiti, né i
+  // vecchi (blocco dopo un rifiuto) né i nuovi (una sola volta a
+  // sera): altrimenti due account di prova che si testano a vicenda
+  // (es. testando il rifiuto di una Pulse) finirebbero per bloccarsi
+  // da soli, impedendo di continuare a testare.
+  const senderTestRow = await db.query(`SELECT is_test_account FROM users WHERE id = $1`, [senderId]);
+  const isTestSender = !!senderTestRow?.is_test_account;
+
+  if (!isTestSender) {
+    const blocked = await db.query(`
+      SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2 AND (arena_session_id IS NULL OR arena_session_id = $3)
+    `, [receiverId, senderId, arenaSessionId]);
+    if (blocked) return { success: false, reason: 'blocked_by_receiver' };
+
+    // NUOVO — non più di un Like e non più di un Superlike alla
+    // STESSA persona nella STESSA serata (stessa arena_session).
+    // Il tipo è compreso nel controllo: aver già mandato un Like
+    // stasera non blocca un Superlike, e viceversa — sono limiti
+    // separati, uno per tipo.
+    const alreadySentThisEvening = await db.query(`
+      SELECT 1 FROM interactions
+      WHERE sender_id = $1 AND receiver_id = $2 AND arena_session_id = $3 AND type = $4
+    `, [senderId, receiverId, arenaSessionId, type]);
+    if (alreadySentThisEvening) {
+      return { success: false, reason: type === 'like' ? 'like_already_sent_tonight' : 'superlike_already_sent_tonight' };
+    }
+  }
   if (blocked) return { success: false, reason: 'blocked_by_receiver' };
 
   if (type === 'superlike') {
@@ -228,10 +254,20 @@ async function respondToSuperlike({ interactionId, receiverId, action }, { db, i
   }
 
   if (action === 'reject' || action === 'ignore') {
+    // Rifiuto = un "no" attivo e voluto → blocco per sempre.
+    // Sospeso = nessuna decisione vera, magari solo distrazione o
+    // un umore diverso quella sera → blocco solo per QUESTA serata,
+    // da quella successiva si può ritentare. Un blocco già
+    // permanente non torna MAI indietro a "solo stasera", anche se
+    // arriva un nuovo "ignora" più avanti — resta sempre il più
+    // forte dei due mai deciso finora.
+    const newArenaSessionId = action === 'reject' ? null : interaction.arena_session_id;
     await db.query(`
-      INSERT INTO blocks (blocker_id, blocked_id) VALUES ($1, $2)
-      ON CONFLICT DO NOTHING
-    `, [receiverId, interaction.sender_id]);
+      INSERT INTO blocks (blocker_id, blocked_id, arena_session_id) VALUES ($1, $2, $3)
+      ON CONFLICT (blocker_id, blocked_id) DO UPDATE SET
+        arena_session_id = CASE WHEN blocks.arena_session_id IS NULL THEN NULL ELSE EXCLUDED.arena_session_id END,
+        created_at = now()
+    `, [receiverId, interaction.sender_id, newArenaSessionId]);
     await db.query(`
       UPDATE interactions SET status = $1 WHERE id = $2
     `, [action === 'reject' ? 'rejected' : 'ignored', interactionId]);
@@ -389,8 +425,8 @@ async function trackProfileView({ viewerId, viewedUserId, arenaSessionId, viaHis
   if (viewerId === viewedUserId) return { success: true, skipped: true }; // non contano le proprie
 
   const blocked = await db.query(`
-    SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2
-  `, [viewedUserId, viewerId]);
+    SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2 AND (arena_session_id IS NULL OR arena_session_id = $3)
+  `, [viewedUserId, viewerId, arenaSessionId]);
   if (blocked) return { success: false, reason: 'blocked_by_viewed_user' };
 
   // Anti-abuso: una sola visita "che conta" per coppia viewer→viewed
@@ -579,11 +615,18 @@ async function respondToPulse({ pulseId, receiverId, action }, { db, io }) {
   // un segnale esplicito di rifiuto (per non rischiare di provocare
   // una reazione ostile in chi non accetta bene un "no").
   if (action === 'reject' || action === 'ignore') {
+    // Stessa distinzione già applicata al Superlike puro: un
+    // rifiuto vero è per sempre, un semplice "in sospeso" vale solo
+    // per questa serata — mai un blocco già permanente che torna
+    // indietro, qualunque cosa arrivi dopo.
+    const newArenaSessionId = action === 'reject' ? null : pulse.arena_session_id;
     await db.query(`
-      INSERT INTO blocks (blocker_id, blocked_id)
-      VALUES ($1, $2)
-      ON CONFLICT DO NOTHING
-    `, [receiverId, pulse.sender_id]);
+      INSERT INTO blocks (blocker_id, blocked_id, arena_session_id)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (blocker_id, blocked_id) DO UPDATE SET
+        arena_session_id = CASE WHEN blocks.arena_session_id IS NULL THEN NULL ELSE EXCLUDED.arena_session_id END,
+        created_at = now()
+    `, [receiverId, pulse.sender_id, newArenaSessionId]);
 
     await db.query(`
       UPDATE pulses SET status = $1 WHERE id = $2
