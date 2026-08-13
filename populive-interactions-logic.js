@@ -68,7 +68,6 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type, via
       return { success: false, reason: type === 'like' ? 'like_already_sent_tonight' : 'superlike_already_sent_tonight' };
     }
   }
-  if (blocked) return { success: false, reason: 'blocked_by_receiver' };
 
   if (type === 'superlike') {
     const check = await canSendDirectContact({ senderId, receiverId }, { db });
