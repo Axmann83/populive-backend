@@ -94,14 +94,14 @@ function setupWebSocket(httpServer, { redis, db }) {
       // default a chiunque, salvo la rivelazione mirata via
       // interazione (evento a parte, mai qui).
       const existingSocketIds = io.sockets.adapter.rooms.get(room) || new Set();
-      const existingUserIds = [];
+      const existingUserIdsSet = new Set(); // un utente può avere più di una connessione attiva nella stessa stanza (es. proprio durante un refresh, la vecchia connessione resta aperta un attimo mentre la nuova si apre) — un Set evita di contarlo/mostrarlo più volte
       for (const socketId of existingSocketIds) {
         const otherSocket = io.sockets.sockets.get(socketId);
         if (otherSocket?.data?.userId && otherSocket.data.userId !== userId && !otherSocket.data.isGhost) {
-          existingUserIds.push(otherSocket.data.userId);
+          existingUserIdsSet.add(otherSocket.data.userId);
         }
       }
-      socket.emit('radar_snapshot', { userIds: existingUserIds });
+      socket.emit('radar_snapshot', { userIds: [...existingUserIdsSet] });
 
       // Confermiamo al telefono stesso che è entrato correttamente
       socket.emit('joined_arena_ack', { arenaSessionId });
