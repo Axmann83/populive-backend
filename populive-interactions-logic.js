@@ -529,6 +529,7 @@ async function createPulseRecord({ senderId, receiverId, arenaSessionId, drinkNa
     pulseId: pulse.id,
     tier,
     drinkType: drinkName,
+    senderId: tier === 'super' ? senderId : null,
     senderName: superSenderProfile?.displayName || null,
     senderPhotoUrl: superSenderProfile?.photoUrl || null,
     senderAvatarEmoji: superSenderProfile?.avatarEmoji || null,
