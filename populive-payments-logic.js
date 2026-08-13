@@ -160,9 +160,15 @@ async function initiatePulsePurchase({ senderId, receiverId, arenaSessionId, dri
   }
 
   const blocked = await db.query(`
-    SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2
-  `, [receiverId, senderId]);
-  if (blocked) return { success: false, reason: 'blocked_by_receiver' };
+    SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2 AND (arena_session_id IS NULL OR arena_session_id = $3)
+  `, [receiverId, senderId, arenaSessionId]);
+  // Un account di prova non deve mai restare bloccato da un
+  // rifiuto/ignora precedente — altrimenti due account di prova
+  // che si testano a vicenda si bloccherebbero da soli, impedendo
+  // di continuare a testare (stesso principio già applicato a
+  // Like/Superlike in sendInteraction).
+  const purchaserTestRow = await db.query(`SELECT is_test_account FROM users WHERE id = $1`, [senderId]);
+  if (blocked && !purchaserTestRow?.is_test_account) return { success: false, reason: 'blocked_by_receiver' };
 
   if (tier === 'super') {
     const check = await canSendDirectContact({ senderId, receiverId }, { db });
