@@ -20,7 +20,7 @@ const Redis = require('ioredis');
 const { setupWebSocket } = require('./populive-websocket-rooms');
 const { handleCheckin, createVirtualVenue, getAllVenuesForMap } = require('./populive-checkin-logic');
 const {
-  sendInteraction, trackProfileView, respondToPulse, attemptGuess, respondToSuperlike, getReceivedPulses, getPulseBalance,
+  sendInteraction, trackProfileView, respondToPulse, attemptGuess, respondToSuperlike, getReceivedPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen,
 } = require('./populive-interactions-logic');
 const { initiatePulsePurchase, initiatePurchase, initiateVenuePulseCreditsPurchase, handleStripeWebhook } = require('./populive-payments-logic');
 const { sendMessage, getMessages, setChatKeepPreference, getMyActiveConversations } = require('./populive-chat-logic');
@@ -728,6 +728,23 @@ app.post('/api/chat/:conversationId/messages', requireOnboarded, ah(async (req, 
 app.get('/api/users/:userId/active-chats', requireOnboarded, ah(async (req, res) => {
   const conversations = await getMyActiveConversations({ userId: req.params.userId }, deps);
   res.json({ success: true, conversations });
+}));
+
+app.get('/api/users/:userId/interaction-history', requireOnboarded, ah(async (req, res) => {
+  // Dati sensibili (chi ha mandato cosa a chi) — SOLO il
+  // proprietario può vederli, mai un ID scritto a mano nell'indirizzo.
+  const history = await getInteractionHistory({ userId: req.userId }, deps);
+  res.json({ success: true, history });
+}));
+
+app.get('/api/users/:userId/unseen-notification-count', requireOnboarded, ah(async (req, res) => {
+  const count = await getUnseenNotificationCount({ userId: req.userId }, deps);
+  res.json({ success: true, count });
+}));
+
+app.post('/api/users/:userId/mark-notifications-seen', requireOnboarded, ah(async (req, res) => {
+  const result = await markNotificationsSeen({ userId: req.userId }, deps);
+  res.json(result);
 }));
 
 app.get('/api/chat/:conversationId/messages', requireOnboarded, ah(async (req, res) => {
