@@ -797,7 +797,7 @@ function generateRedeemCode() {
  */
 async function getReceivedPulses({ userId }, { db }) {
   const pulses = await db.queryAll(`
-    SELECT r.id, r.drink_type, r.tier, r.status, r.chat_unlocked, r.created_at,
+    SELECT r.id, r.drink_type, r.tier, r.status, r.chat_unlocked, r.created_at, r.redeem_code,
            v.name AS venue_name,
            CASE WHEN r.tier = 'super' OR r.chat_unlocked THEN u.display_name ELSE NULL END AS sender_name
     FROM pulses r
@@ -816,6 +816,11 @@ async function getReceivedPulses({ userId }, { db }) {
     venueName: r.venue_name,
     senderName: r.sender_name, // null se ancora anonimo
     createdAt: r.created_at,
+    // Solo per quelle accettate ma non ancora riscattate — serve al
+    // pulsante "Riscatta ora" nella lista, per aprire il sigillo
+    // quando la persona è pronta, non necessariamente subito dopo
+    // aver accettato (es. se ha aperto prima la chat).
+    redeemCode: r.status === 'accepted' ? r.redeem_code : null,
   }));
 }
 
@@ -838,4 +843,139 @@ async function getPulseBalance({ userId }, { db }) {
   };
 }
 
-module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createPulseRecord, respondToPulse, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedPulses, getPulseBalance };
+/**
+ * ============================================================
+ * CENTRO NOTIFICHE — storico cronologico completo
+ * ============================================================
+ * Unisce Like, Superlike e Pulse (tutte le varianti) — sia inviate
+ * sia ricevute — in un unico elenco ordinato per data. Rispetta le
+ * STESSE regole di anonimato già in vigore ovunque nell'app: mai
+ * svelare a chi riceve un Like/Pulse anonimo chi sia stato, a meno
+ * che non sia scattato davvero un match/sblocco chat — le proprie
+ * azioni inviate invece sono sempre visibili per intero (le ha
+ * scelte la persona stessa).
+ *
+ * Un match da Like reciproco NON compare come due righe separate
+ * ("hai mandato un Like" + "hai ricevuto un Like, svelato") — le
+ * due righe originali vengono escluse ed è sostituita da UN'UNICA
+ * notifica di festeggiamento ("Hai matchato con [nome]!"), stile
+ * Facebook/Tinder — molto più pulito che raccontare due volte lo
+ * stesso evento da due lati diversi. Rilevato direttamente dai due
+ * Like reciproci nella tabella interactions (non dalla chat
+ * associata) — una stessa coppia può già avere una conversazione
+ * aperta da un motivo diverso (es. un Superlike precedente), che
+ * verrebbe solo RIUSATA per il match successivo invece di crearne
+ * una nuova, rendendo inaffidabile un controllo basato su quella.
+ * ============================================================
+ */
+async function getInteractionHistory({ userId }, { db }) {
+  const rows = await db.queryAll(`
+    (
+      SELECT i.id::text AS id, i.type AS kind, i.status, i.created_at,
+             CASE WHEN i.sender_id = $1 THEN 'sent' ELSE 'received' END AS direction,
+             CASE WHEN i.sender_id = $1 THEN i.receiver_id ELSE i.sender_id END AS other_user_id,
+             NULL AS drink_type, NULL AS chat_unlocked
+      FROM interactions i
+      WHERE (i.sender_id = $1 OR i.receiver_id = $1)
+        AND NOT (
+          i.type = 'like' AND EXISTS(
+            SELECT 1 FROM interactions r
+            WHERE r.sender_id = i.receiver_id AND r.receiver_id = i.sender_id AND r.type = 'like'
+          )
+        )
+    )
+    UNION ALL
+    (
+      SELECT p.id::text AS id, ('pulse_' || p.tier) AS kind, p.status, p.created_at,
+             CASE WHEN p.sender_id = $1 THEN 'sent' ELSE 'received' END AS direction,
+             CASE WHEN p.sender_id = $1 THEN p.receiver_id ELSE p.sender_id END AS other_user_id,
+             p.drink_type, p.chat_unlocked
+      FROM pulses p
+      WHERE p.sender_id = $1 OR p.receiver_id = $1
+    )
+    UNION ALL
+    (
+      SELECT MIN(i.id::text) AS id, 'like_match' AS kind, 'matched' AS status,
+             MAX(i.created_at) AS created_at,
+             'match' AS direction,
+             CASE WHEN i.sender_id = $1 THEN i.receiver_id ELSE i.sender_id END AS other_user_id,
+             NULL AS drink_type, NULL AS chat_unlocked
+      FROM interactions i
+      WHERE i.type = 'like' AND (i.sender_id = $1 OR i.receiver_id = $1)
+        AND EXISTS (
+          SELECT 1 FROM interactions r
+          WHERE r.type = 'like'
+            AND r.sender_id = CASE WHEN i.sender_id = $1 THEN i.receiver_id ELSE i.sender_id END
+            AND r.receiver_id = $1
+        )
+      GROUP BY other_user_id
+    )
+    ORDER BY created_at DESC
+    LIMIT 150
+  `, [userId]);
+
+  // Chi va svelato: sempre le proprie azioni inviate E i match (per
+  // definizione un match svela già l'identità a entrambi); per il
+  // resto ricevuto, solo Superlike/Pulse+Superlike (mostrano sempre
+  // l'identità, coerente col resto dell'app) o una Pulse anonima
+  // con chat_unlocked vero. Un Like ricevuto SENZA match resta
+  // sempre anonimo qui — se avesse portato a un match, non
+  // comparirebbe più come riga a sé (v. sopra, escluso alla fonte).
+  const revealed = rows.map((r) => {
+    let reveal = false;
+    if (r.direction === 'sent' || r.direction === 'match') {
+      reveal = true;
+    } else if (r.kind === 'superlike' || r.kind === 'pulse_super') {
+      reveal = true;
+    } else if (r.kind === 'pulse_standalone' || r.kind === 'pulse_like') {
+      reveal = !!r.chat_unlocked;
+    }
+    return { ...r, reveal };
+  });
+
+  const idsToFetch = [...new Set(revealed.filter((r) => r.reveal).map((r) => r.other_user_id))];
+  const profiles = {};
+  if (idsToFetch.length > 0) {
+    const profileRows = await db.queryAll(`
+      SELECT id, display_name, photo_url FROM users WHERE id = ANY($1)
+    `, [idsToFetch]);
+    profileRows.forEach((p) => { profiles[p.id] = { displayName: p.display_name, photoUrl: p.photo_url }; });
+  }
+
+  return revealed.map((r) => ({
+    id: r.id,
+    kind: r.kind, // 'like' | 'superlike' | 'pulse_standalone' | 'pulse_like' | 'pulse_super' | 'like_match'
+    status: r.status,
+    direction: r.direction, // 'sent' | 'received' | 'match'
+    createdAt: r.created_at,
+    drinkType: r.drink_type,
+    otherPerson: r.reveal ? (profiles[r.other_user_id] || null) : null,
+  }));
+}
+
+/**
+ * Numero sul pallino della scheda Notifiche — quante interazioni
+ * ricevute (Like/Superlike/Pulse insieme) da quando la persona ha
+ * aperto DAVVERO il Centro Notifiche l'ultima volta. Colonna
+ * dedicata (notifications_last_seen_at), separata apposta da
+ * last_seen_at (quella serve al "Bentornato" e ai suoi punti, un
+ * concetto diverso).
+ */
+async function getUnseenNotificationCount({ userId }, { db }) {
+  const row = await db.query(`
+    SELECT COUNT(*) AS total FROM (
+      (SELECT id, created_at FROM interactions WHERE receiver_id = $1)
+      UNION ALL
+      (SELECT id, created_at FROM pulses WHERE receiver_id = $1)
+    ) combined
+    WHERE created_at > (SELECT notifications_last_seen_at FROM users WHERE id = $1)
+  `, [userId]);
+  return parseInt(row?.total) || 0;
+}
+
+async function markNotificationsSeen({ userId }, { db }) {
+  await db.query(`UPDATE users SET notifications_last_seen_at = now() WHERE id = $1`, [userId]);
+  return { success: true };
+}
+
+module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createPulseRecord, respondToPulse, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen };
