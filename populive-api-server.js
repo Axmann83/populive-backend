@@ -20,7 +20,7 @@ const Redis = require('ioredis');
 const { setupWebSocket } = require('./populive-websocket-rooms');
 const { handleCheckin, createVirtualVenue, getAllVenuesForMap } = require('./populive-checkin-logic');
 const {
-  sendInteraction, trackProfileView, respondToPulse, attemptGuess, respondToSuperlike, getReceivedPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews,
+  sendInteraction, trackProfileView, respondToPulse, attemptGuess, respondToSuperlike, getReceivedPulses, getSentPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews,
 } = require('./populive-interactions-logic');
 const { initiatePulsePurchase, initiatePurchase, initiateVenuePulseCreditsPurchase, handleStripeWebhook } = require('./populive-payments-logic');
 const { sendMessage, getMessages, setChatKeepPreference, getMyActiveConversations, markConversationRead, getUnreadChatCount } = require('./populive-chat-logic');
@@ -314,6 +314,11 @@ app.get('/api/users/:userId/pulses', requireOnboarded, ah(async (req, res) => {
   // nell'indirizzo. Usiamo sempre req.userId (dal token verificato),
   // ignorando qualunque cosa sia scritta nell'URL.
   const pulses = await getReceivedPulses({ userId: req.userId }, deps);
+  res.json({ success: true, pulses });
+}));
+
+app.get('/api/users/:userId/sent-pulses', requireOnboarded, ah(async (req, res) => {
+  const pulses = await getSentPulses({ userId: req.userId }, deps);
   res.json({ success: true, pulses });
 }));
 
