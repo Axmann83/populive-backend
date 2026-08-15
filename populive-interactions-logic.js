@@ -870,45 +870,59 @@ async function getPulseBalance({ userId }, { db }) {
  */
 async function getInteractionHistory({ userId }, { db }) {
   const rows = await db.queryAll(`
-    (
-      SELECT i.id::text AS id, i.type AS kind, i.status, i.created_at,
-             CASE WHEN i.sender_id = $1 THEN 'sent' ELSE 'received' END AS direction,
-             CASE WHEN i.sender_id = $1 THEN i.receiver_id ELSE i.sender_id END AS other_user_id,
-             NULL AS drink_type, NULL AS chat_unlocked
-      FROM interactions i
-      WHERE (i.sender_id = $1 OR i.receiver_id = $1)
-        AND NOT (
-          i.type = 'like' AND EXISTS(
-            SELECT 1 FROM interactions r
-            WHERE r.sender_id = i.receiver_id AND r.receiver_id = i.sender_id AND r.type = 'like'
+    WITH combined AS (
+      (
+        SELECT i.id::text AS id, i.type AS kind, i.status, i.created_at,
+               CASE WHEN i.sender_id = $1 THEN 'sent' ELSE 'received' END AS direction,
+               CASE WHEN i.sender_id = $1 THEN i.receiver_id ELSE i.sender_id END AS other_user_id,
+               NULL AS drink_type, NULL AS chat_unlocked
+        FROM interactions i
+        WHERE (i.sender_id = $1 OR i.receiver_id = $1)
+          AND NOT (
+            i.type = 'like' AND EXISTS(
+              SELECT 1 FROM interactions r
+              WHERE r.sender_id = i.receiver_id AND r.receiver_id = i.sender_id AND r.type = 'like'
+            )
           )
-        )
+      )
+      UNION ALL
+      (
+        SELECT p.id::text AS id, ('pulse_' || p.tier) AS kind, p.status, p.created_at,
+               CASE WHEN p.sender_id = $1 THEN 'sent' ELSE 'received' END AS direction,
+               CASE WHEN p.sender_id = $1 THEN p.receiver_id ELSE p.sender_id END AS other_user_id,
+               p.drink_type, p.chat_unlocked
+        FROM pulses p
+        WHERE p.sender_id = $1 OR p.receiver_id = $1
+      )
+      UNION ALL
+      (
+        SELECT MIN(i.id::text) AS id, 'like_match' AS kind, 'matched' AS status,
+               MAX(i.created_at) AS created_at,
+               'match' AS direction,
+               CASE WHEN i.sender_id = $1 THEN i.receiver_id ELSE i.sender_id END AS other_user_id,
+               NULL AS drink_type, NULL AS chat_unlocked
+        FROM interactions i
+        WHERE i.type = 'like' AND (i.sender_id = $1 OR i.receiver_id = $1)
+          AND EXISTS (
+            SELECT 1 FROM interactions r
+            WHERE r.type = 'like'
+              AND r.sender_id = CASE WHEN i.sender_id = $1 THEN i.receiver_id ELSE i.sender_id END
+              AND r.receiver_id = $1
+          )
+        GROUP BY other_user_id
+      )
     )
-    UNION ALL
-    (
-      SELECT p.id::text AS id, ('pulse_' || p.tier) AS kind, p.status, p.created_at,
-             CASE WHEN p.sender_id = $1 THEN 'sent' ELSE 'received' END AS direction,
-             CASE WHEN p.sender_id = $1 THEN p.receiver_id ELSE p.sender_id END AS other_user_id,
-             p.drink_type, p.chat_unlocked
-      FROM pulses p
-      WHERE p.sender_id = $1 OR p.receiver_id = $1
+    -- Nascosti, non cancellati: sia il "ripulisci tutto" (tutto ciò
+    -- che è più vecchio del momento in cui è stato premuto) sia le
+    -- singole "x" mai tolgono le righe vere sottostanti.
+    SELECT c.* FROM combined c
+    WHERE (
+      (SELECT notifications_cleared_before FROM users WHERE id = $1) IS NULL
+      OR c.created_at > (SELECT notifications_cleared_before FROM users WHERE id = $1)
     )
-    UNION ALL
-    (
-      SELECT MIN(i.id::text) AS id, 'like_match' AS kind, 'matched' AS status,
-             MAX(i.created_at) AS created_at,
-             'match' AS direction,
-             CASE WHEN i.sender_id = $1 THEN i.receiver_id ELSE i.sender_id END AS other_user_id,
-             NULL AS drink_type, NULL AS chat_unlocked
-      FROM interactions i
-      WHERE i.type = 'like' AND (i.sender_id = $1 OR i.receiver_id = $1)
-        AND EXISTS (
-          SELECT 1 FROM interactions r
-          WHERE r.type = 'like'
-            AND r.sender_id = CASE WHEN i.sender_id = $1 THEN i.receiver_id ELSE i.sender_id END
-            AND r.receiver_id = $1
-        )
-      GROUP BY other_user_id
+    AND NOT EXISTS (
+      SELECT 1 FROM dismissed_notifications d
+      WHERE d.user_id = $1 AND d.entry_key = c.kind || '-' || c.id
     )
     ORDER BY created_at DESC
     LIMIT 150
@@ -978,4 +992,29 @@ async function markNotificationsSeen({ userId }, { db }) {
   return { success: true };
 }
 
-module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createPulseRecord, respondToPulse, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen };
+/**
+ * Nasconde una singola notifica (la "x" su una riga) — mai la riga
+ * vera sottostante, solo un segno "non mostrarla più a questa
+ * persona" in una tabella leggera a sé.
+ */
+async function dismissNotification({ userId, kind, entryId }, { db }) {
+  await db.query(`
+    INSERT INTO dismissed_notifications (user_id, entry_key)
+    VALUES ($1, $2)
+    ON CONFLICT (user_id, entry_key) DO NOTHING
+  `, [userId, `${kind}-${entryId}`]);
+  return { success: true };
+}
+
+/**
+ * "Ripulisci tutto" — un solo timestamp aggiornato, non una riga
+ * per ogni notifica esistente (che con centinaia di interazioni
+ * crescerebbe senza limite). Nasconde tutto ciò che è più vecchio
+ * di questo momento; quello che arriva DOPO resta visibile.
+ */
+async function clearAllNotifications({ userId }, { db }) {
+  await db.query(`UPDATE users SET notifications_cleared_before = now() WHERE id = $1`, [userId]);
+  return { success: true };
+}
+
+module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createPulseRecord, respondToPulse, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications };
