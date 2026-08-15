@@ -20,7 +20,7 @@ const Redis = require('ioredis');
 const { setupWebSocket } = require('./populive-websocket-rooms');
 const { handleCheckin, createVirtualVenue, getAllVenuesForMap } = require('./populive-checkin-logic');
 const {
-  sendInteraction, trackProfileView, respondToPulse, attemptGuess, respondToSuperlike, getReceivedPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications,
+  sendInteraction, trackProfileView, respondToPulse, attemptGuess, respondToSuperlike, getReceivedPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews,
 } = require('./populive-interactions-logic');
 const { initiatePulsePurchase, initiatePurchase, initiateVenuePulseCreditsPurchase, handleStripeWebhook } = require('./populive-payments-logic');
 const { sendMessage, getMessages, setChatKeepPreference, getMyActiveConversations, markConversationRead, getUnreadChatCount } = require('./populive-chat-logic');
@@ -755,6 +755,16 @@ app.post('/api/users/:userId/notifications/dismiss', requireOnboarded, ah(async 
 
 app.post('/api/users/:userId/notifications/clear-all', requireOnboarded, ah(async (req, res) => {
   const result = await clearAllNotifications({ userId: req.userId }, deps);
+  res.json(result);
+}));
+
+app.post('/api/users/:userId/pulses/:pulseId/dismiss', requireOnboarded, ah(async (req, res) => {
+  const result = await dismissPulseView({ userId: req.userId, pulseId: req.params.pulseId }, deps);
+  res.json(result);
+}));
+
+app.post('/api/users/:userId/pulses/clear-all', requireOnboarded, ah(async (req, res) => {
+  const result = await clearAllPulseViews({ userId: req.userId }, deps);
   res.json(result);
 }));
 
