@@ -209,4 +209,44 @@ async function getMyActiveConversations({ userId }, { db }) {
   }));
 }
 
-module.exports = { openChatConversation, sendMessage, getMessages, closeConversationsForSession, setChatKeepPreference, purgeExpiredChatMessages, getMyActiveConversations };
+/**
+ * Segna come "letta" una conversazione per QUESTA persona — va
+ * chiamata quando apre davvero quella chat specifica, non solo
+ * quando naviga sul Centro Chat in generale.
+ */
+async function markConversationRead({ conversationId, userId }, { db }) {
+  const conv = await db.query(`SELECT user_a_id, user_b_id FROM chat_conversations WHERE id = $1`, [conversationId]);
+  if (!conv) return { success: false, reason: 'conversation_not_found' };
+  if (conv.user_a_id !== userId && conv.user_b_id !== userId) {
+    return { success: false, reason: 'not_a_participant' };
+  }
+  const column = conv.user_a_id === userId ? 'user_a_last_read_at' : 'user_b_last_read_at';
+  await db.query(`UPDATE chat_conversations SET ${column} = now() WHERE id = $1`, [conversationId]);
+  return { success: true };
+}
+
+/**
+ * Quante conversazioni hanno DAVVERO qualcosa di nuovo da vedere —
+ * non il totale delle chat aperte (che restava sul pallino anche a
+ * chat già letta e in corso, un bug vero segnalato dal vivo), solo
+ * quelle con un messaggio dell'ALTRA persona arrivato dopo l'ultima
+ * volta che questa persona ha aperto proprio QUELLA chat.
+ */
+async function getUnreadChatCount({ userId }, { db }) {
+  const row = await db.query(`
+    SELECT COUNT(*) AS total FROM chat_conversations c
+    WHERE (c.user_a_id = $1 OR c.user_b_id = $1) AND c.closed_at IS NULL
+      AND EXISTS (
+        SELECT 1 FROM chat_messages m
+        WHERE m.conversation_id = c.id
+          AND m.sender_id != $1
+          AND m.created_at > COALESCE(
+            CASE WHEN c.user_a_id = $1 THEN c.user_a_last_read_at ELSE c.user_b_last_read_at END,
+            '1970-01-01'::timestamptz
+          )
+      )
+  `, [userId]);
+  return parseInt(row?.total) || 0;
+}
+
+module.exports = { openChatConversation, sendMessage, getMessages, closeConversationsForSession, setChatKeepPreference, purgeExpiredChatMessages, getMyActiveConversations, markConversationRead, getUnreadChatCount };
