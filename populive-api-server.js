@@ -23,7 +23,7 @@ const {
   sendInteraction, trackProfileView, respondToPulse, attemptGuess, respondToSuperlike, getReceivedPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications,
 } = require('./populive-interactions-logic');
 const { initiatePulsePurchase, initiatePurchase, initiateVenuePulseCreditsPurchase, handleStripeWebhook } = require('./populive-payments-logic');
-const { sendMessage, getMessages, setChatKeepPreference, getMyActiveConversations } = require('./populive-chat-logic');
+const { sendMessage, getMessages, setChatKeepPreference, getMyActiveConversations, markConversationRead, getUnreadChatCount } = require('./populive-chat-logic');
 const { startScheduler } = require('./populive-scheduler');
 const {
   createProfile, setProfilePhoto, updateProfileDetails, completeOnboarding, requireCompletedOnboarding, getPublicProfile,
@@ -763,6 +763,16 @@ app.get('/api/chat/:conversationId/messages', requireOnboarded, ah(async (req, r
     conversationId: req.params.conversationId, requesterId: req.userId,
   }, deps);
   res.json(result);
+}));
+
+app.post('/api/chat/:conversationId/mark-read', requireOnboarded, ah(async (req, res) => {
+  const result = await markConversationRead({ conversationId: req.params.conversationId, userId: req.userId }, deps);
+  res.json(result);
+}));
+
+app.get('/api/users/:userId/unread-chat-count', requireOnboarded, ah(async (req, res) => {
+  const count = await getUnreadChatCount({ userId: req.userId }, deps);
+  res.json({ success: true, count });
 }));
 
 app.post('/api/chat/:conversationId/keep-preference', requireOnboarded, ah(async (req, res) => {
