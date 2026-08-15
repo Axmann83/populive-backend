@@ -805,6 +805,14 @@ async function getReceivedPulses({ userId }, { db }) {
     JOIN venues v ON v.id = a.venue_id
     JOIN users u ON u.id = r.sender_id
     WHERE r.receiver_id = $1
+      AND (
+        (SELECT pulses_cleared_before FROM users WHERE id = $1) IS NULL
+        OR r.created_at > (SELECT pulses_cleared_before FROM users WHERE id = $1)
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM dismissed_notifications d
+        WHERE d.user_id = $1 AND d.entry_key = 'pulse_view-' || r.id::text
+      )
     ORDER BY r.created_at DESC
   `, [userId]);
 
@@ -822,6 +830,31 @@ async function getReceivedPulses({ userId }, { db }) {
     // aver accettato (es. se ha aperto prima la chat).
     redeemCode: r.status === 'accepted' ? r.redeem_code : null,
   }));
+}
+
+/**
+ * Nasconde una singola Pulse dalla LISTA DI LAVORO (questa
+ * schermata) — separato apposta dalle dismissioni del Centro
+ * Notifiche (stessa tabella, prefisso diverso nella chiave): sono
+ * due viste con scopi diversi, eliminarla da una non deve toccare
+ * l'altra. Mai la riga vera sottostante, solo nascosta qui.
+ */
+async function dismissPulseView({ userId, pulseId }, { db }) {
+  await db.query(`
+    INSERT INTO dismissed_notifications (user_id, entry_key)
+    VALUES ($1, $2)
+    ON CONFLICT (user_id, entry_key) DO NOTHING
+  `, [userId, `pulse_view-${pulseId}`]);
+  return { success: true };
+}
+
+/**
+ * "Ripulisci tutto" per la lista Pulse — stesso principio del
+ * Centro Notifiche (un timestamp solo, non una riga per Pulse).
+ */
+async function clearAllPulseViews({ userId }, { db }) {
+  await db.query(`UPDATE users SET pulses_cleared_before = now() WHERE id = $1`, [userId]);
+  return { success: true };
 }
 
 /**
@@ -1017,4 +1050,4 @@ async function clearAllNotifications({ userId }, { db }) {
   return { success: true };
 }
 
-module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createPulseRecord, respondToPulse, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications };
+module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createPulseRecord, respondToPulse, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews };
