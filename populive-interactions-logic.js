@@ -833,6 +833,48 @@ async function getReceivedPulses({ userId }, { db }) {
 }
 
 /**
+ * Gemella di getReceivedPulses, ma dal lato di chi ha INVIATO —
+ * per la visione complessiva unica richiesta dall'utente (vedere
+ * insieme, sulla stessa pagina, ricevute E inviate). Chi le ha
+ * mandate conosce già sempre chi è il destinatario (l'ha scelto
+ * lui stesso), quindi qui il nome non è mai nascosto — a
+ * differenza delle ricevute, dove l'anonimato dipende dalla
+ * variante. Nessun redeem_code qui: solo chi riceve può riscattare,
+ * mai chi ha inviato.
+ */
+async function getSentPulses({ userId }, { db }) {
+  const pulses = await db.queryAll(`
+    SELECT r.id, r.drink_type, r.tier, r.status, r.created_at,
+           v.name AS venue_name,
+           u.display_name AS receiver_name
+    FROM pulses r
+    JOIN arena_sessions a ON a.id = r.arena_session_id
+    JOIN venues v ON v.id = a.venue_id
+    JOIN users u ON u.id = r.receiver_id
+    WHERE r.sender_id = $1
+      AND (
+        (SELECT pulses_cleared_before FROM users WHERE id = $1) IS NULL
+        OR r.created_at > (SELECT pulses_cleared_before FROM users WHERE id = $1)
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM dismissed_notifications d
+        WHERE d.user_id = $1 AND d.entry_key = 'pulse_view-' || r.id::text
+      )
+    ORDER BY r.created_at DESC
+  `, [userId]);
+
+  return pulses.map((r) => ({
+    pulseId: r.id,
+    drinkType: r.drink_type,
+    tier: r.tier,
+    status: r.status,
+    venueName: r.venue_name,
+    receiverName: r.receiver_name, // sempre visibile, l'ha scelto chi ha inviato
+    createdAt: r.created_at,
+  }));
+}
+
+/**
  * Nasconde una singola Pulse dalla LISTA DI LAVORO (questa
  * schermata) — separato apposta dalle dismissioni del Centro
  * Notifiche (stessa tabella, prefisso diverso nella chiave): sono
@@ -1050,4 +1092,4 @@ async function clearAllNotifications({ userId }, { db }) {
   return { success: true };
 }
 
-module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createPulseRecord, respondToPulse, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews };
+module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createPulseRecord, respondToPulse, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedPulses, getSentPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews };
