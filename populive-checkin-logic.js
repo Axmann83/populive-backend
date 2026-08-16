@@ -15,6 +15,8 @@
  * ============================================================
  */
 
+const { refundPulseCredit } = require('./populive-interactions-logic');
+
 async function handleCheckin({ userId, venueId }, { db, redis, io }) {
 
   // ------------------------------------------------------------
@@ -67,22 +69,43 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
   `, [userId, session.id]);
 
   // ------------------------------------------------------------
-  // STEP 2.5 — Un Pulse è legato al locale in cui è stato ricevuto:
-  // appena la persona fa check-in in un locale DIVERSO, ogni Pulse
-  // ancora da riscattare (mai una missione, mai punti — quelli
-  // restano sempre) va perso. Se invece fa due serate di fila nello
-  // STESSO locale, i Pulse restano validi anche il giorno dopo —
-  // la scadenza è legata al comportamento reale della persona, non
-  // a un timer fisso. Confrontiamo per LOCALE, non per singola
-  // sessione/serata, proprio per questo.
-  await db.query(`
-    UPDATE pulses SET status = 'expired'
-    WHERE receiver_id = $1
-      AND status = 'accepted'
-      AND arena_session_id IN (
-        SELECT id FROM arena_sessions WHERE venue_id != $2
-      )
+  // STEP 2.5 — Un Pulse è legato al locale in cui è stato ricevuto.
+  // Decisione presa con l'utente (14/8), due regole diverse a
+  // seconda di cosa il destinatario ha fatto finora:
+  //
+  //   - MAI DECISA o LASCIATA IN SOSPESO (pending/ignored): appena
+  //     la persona fa check-in in un locale DIVERSO, consideriamo
+  //     la questione chiusa — chi l'ha mandata riceve INDIETRO un
+  //     credito Pulse (mai contanti veri, un credito equivalente),
+  //     e la Pulse stessa viene segnata scaduta. Prima di questo
+  //     momento però, il destinatario ha sempre una finestra vera
+  //     per ripensarci e accettarla comunque.
+  //
+  //   - GIÀ ACCETTATA (accepted): NON scade più cambiando locale —
+  //     i soldi sono già "vinti" dal destinatario in quel momento.
+  //     Resta semplicemente non ritirabile finché non torna nel
+  //     locale giusto (il controllo vero è già a monte, al momento
+  //     del riscatto — v. populive-api-server.js, confronto tra
+  //     origin_venue_id e il locale in cui si prova a riscattare).
+  const abandonedPulses = await db.queryAll(`
+    SELECT p.id, p.sender_id
+    FROM pulses p
+    JOIN arena_sessions a ON a.id = p.arena_session_id
+    WHERE p.receiver_id = $1
+      AND p.status IN ('pending', 'ignored')
+      AND a.venue_id != $2
   `, [userId, venueId]);
+
+  for (const p of abandonedPulses) {
+    await refundPulseCredit({ userId: p.sender_id }, { db });
+  }
+
+  if (abandonedPulses.length > 0) {
+    await db.query(`
+      UPDATE pulses SET status = 'expired'
+      WHERE id = ANY($1)
+    `, [abandonedPulses.map((p) => p.id)]);
+  }
 
   // ------------------------------------------------------------
   // STEP 3 — Aggiornare lo stato "vivo" in Redis
