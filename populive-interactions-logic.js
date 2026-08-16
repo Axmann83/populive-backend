@@ -217,6 +217,12 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type, via
       }, { db, io });
       matchConversationId = chat.conversationId;
 
+      // Anti-abuso punti: un match vero blocca da qui in poi
+      // qualunque NUOVA interazione tra queste due persone, in
+      // entrambe le direzioni — altrimenti potrebbero rimandarsi
+      // Like all'infinito solo per farsi salire i punti a vicenda.
+      await blockBothDirectionsPermanently({ userAId: senderId, userBId: receiverId }, { db });
+
       io.to(`user_${senderId}`).emit('chat_unlocked', { withUserId: receiverId, conversationId: matchConversationId, viaReciprocalLike: true });
       io.to(`user_${receiverId}`).emit('chat_unlocked', { withUserId: senderId, conversationId: matchConversationId, viaReciprocalLike: true });
 
@@ -280,6 +286,11 @@ async function respondToSuperlike({ interactionId, receiverId, action }, { db, i
       userAId: interaction.sender_id, userBId: receiverId,
       arenaSessionId: interaction.arena_session_id, unlockedVia: 'superlike',
     }, { db, io });
+
+    // Anti-abuso punti: stesso principio del Like reciproco — un
+    // Superlike accettato è un "sì" vero, non deve poter essere
+    // ripetuto all'infinito solo per far salire i punti.
+    await blockBothDirectionsPermanently({ userAId: interaction.sender_id, userBId: receiverId }, { db });
 
     io.to(`user_${interaction.sender_id}`).emit('chat_unlocked', {
       withUserId: receiverId, conversationId: chat.conversationId,
@@ -659,6 +670,14 @@ async function respondToPulse({ pulseId, receiverId, action }, { db, io }) {
       WHERE id = $3
     `, [pulse.tier === 'super', redeemCode, pulseId]);
 
+    // Anti-abuso punti: stesso principio già applicato a Like
+    // reciproco e Superlike — accettare una Pulse (in QUALUNQUE
+    // variante, anche standalone/+like) è un "sì" vero, non deve
+    // poter essere ripetuto all'infinito solo per far salire i
+    // punti. Vale per tutti e tre i tier allo stesso modo, non
+    // solo per il Pulse+Superlike.
+    await blockBothDirectionsPermanently({ userAId: pulse.sender_id, userBId: receiverId }, { db });
+
     // I punti per aver ricevuto la Pulse sono già stati assegnati al
     // momento della ricezione vera (in createPulseRecord) — allineato
     // a Like/Superlike, che danno sempre punti al ricevimento, mai
@@ -934,6 +953,39 @@ async function clearAllPulseViews({ userId }, { db }) {
  * DOVE può ritirarla (stessa regola per locale citata sopra).
  * ============================================================
  */
+/**
+ * ============================================================
+ * BLOCCO PERMANENTE BIDIREZIONALE — anti-abuso punti
+ * ============================================================
+ * Regola decisa con l'utente (14/8): appena scatta un'interazione
+ * POSITIVA vera (Like reciproco, Superlike accettato, Pulse
+ * accettato in qualunque variante), le due persone non devono più
+ * potersi mandare NESSUNA nuova interazione tra loro — altrimenti
+ * potrebbero rimandarsi Like/Superlike/Pulse all'infinito solo per
+ * far salire i punti a vicenda, truffando il sistema.
+ *
+ * A differenza del blocco normale (una direzione sola, nato da un
+ * rifiuto — chi riceve blocca chi ha inviato), qui servono ENTRAMBE
+ * le direzioni: il "sì" è stato reciproco, quindi il blocco lo è
+ * altrettanto. Riusa la STESSA tabella blocks già esistente (e già
+ * controllata ovunque un'interazione viene inviata) — nessun nuovo
+ * controllo da aggiungere nei punti di invio, scatta da solo.
+ * Sempre permanente (mai scoped a una sola serata, a differenza di
+ * un "lascia in sospeso") — un match vero non si "dimentica" al
+ * cambio di serata.
+ * ============================================================
+ */
+async function blockBothDirectionsPermanently({ userAId, userBId }, { db }) {
+  await db.query(`
+    INSERT INTO blocks (blocker_id, blocked_id, arena_session_id) VALUES ($1, $2, NULL)
+    ON CONFLICT (blocker_id, blocked_id) DO UPDATE SET arena_session_id = NULL, created_at = now()
+  `, [userAId, userBId]);
+  await db.query(`
+    INSERT INTO blocks (blocker_id, blocked_id, arena_session_id) VALUES ($1, $2, NULL)
+    ON CONFLICT (blocker_id, blocked_id) DO UPDATE SET arena_session_id = NULL, created_at = now()
+  `, [userBId, userAId]);
+}
+
 async function refundPulseCredit({ userId }, { db }) {
   await db.query(`UPDATE users SET paid_pulse_credits = paid_pulse_credits + 1 WHERE id = $1`, [userId]);
 }
