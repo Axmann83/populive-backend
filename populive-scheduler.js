@@ -17,6 +17,7 @@
 
 const { closeConversationsForSession, purgeExpiredChatMessages } = require('./populive-chat-logic');
 const { evaluatePendingDiscoveryMarkers } = require('./populive-connector-engine');
+const { refundAbandonedPulsesForSession } = require('./populive-interactions-logic');
 
 const TICK_INTERVAL_MS = 5 * 60 * 1000; // ogni 5 minuti — abbastanza spesso da non far
                                           // aspettare troppo un locale che sta per aprire,
@@ -162,7 +163,8 @@ async function ensureSessionOpen(venue, { db, io }) {
  * Se una sessione di questo locale è ancora "aperta" ma siamo fuori
  * dall'orario operativo, la chiudiamo: blocchiamo nuovi check-in,
  * congeliamo la classifica locale, chiudiamo le chat di quella
- * sessione (rispettando il doppio consenso "conserva"), e puliamo
+ * sessione (rispettando il doppio consenso "conserva"), rimborsiamo
+ * chi ha inviato una Pulse mai decisa dal destinatario, e puliamo
  * lo stato vivo in Redis — i punti restano per sempre nel ledger,
  * solo il "vivo" della serata sparisce.
  */
@@ -184,6 +186,15 @@ async function closeSessionIfOpen(venue, { db, redis, io }) {
   // Chat: rispetta il doppio consenso "conserva" già costruito —
   // chiude solo quelle senza consenso reciproco.
   await closeConversationsForSession(openSession.id, { db });
+
+  // Pulse mai decise (pending/ignored) — buco trovato dal vivo:
+  // restare nello stesso locale per sempre, senza mai scansionare
+  // un altro QR, avrebbe permesso di rimandare la decisione a
+  // tempo indeterminato. A fine serata la questione si chiude
+  // comunque, con lo stesso rimborso già previsto per il cambio
+  // locale. Le Pulse GIÀ accettate non c'entrano, restano valide
+  // come deciso in precedenza.
+  await refundAbandonedPulsesForSession(openSession.id, { db });
 
   // Pulizia dello stato "vivo" in Redis — il radar in tempo reale
   // e il contatore soglia di questa sessione non servono più.
