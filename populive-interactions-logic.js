@@ -808,7 +808,9 @@ async function getReceivedPulses({ userId }, { db }) {
   const pulses = await db.queryAll(`
     SELECT r.id, r.drink_type, r.tier, r.status, r.chat_unlocked, r.created_at, r.redeem_code,
            v.id AS venue_id, v.name AS venue_name,
-           CASE WHEN r.tier = 'super' OR r.chat_unlocked THEN u.display_name ELSE NULL END AS sender_name
+           CASE WHEN r.tier = 'super' OR r.chat_unlocked THEN u.display_name ELSE NULL END AS sender_name,
+           CASE WHEN r.tier = 'super' OR r.chat_unlocked THEN u.id ELSE NULL END AS sender_id,
+           CASE WHEN r.tier = 'super' OR r.chat_unlocked THEN u.photo_url ELSE NULL END AS sender_photo_url
     FROM pulses r
     JOIN arena_sessions a ON a.id = r.arena_session_id
     JOIN venues v ON v.id = a.venue_id
@@ -833,6 +835,8 @@ async function getReceivedPulses({ userId }, { db }) {
     venueId: r.venue_id, // serve al frontend per capire se si è nel locale giusto per riscattare
     venueName: r.venue_name,
     senderName: r.sender_name, // null se ancora anonimo
+    senderId: r.sender_id, // null se ancora anonimo — serve per aprire il profilo completo dalla riga
+    senderPhotoUrl: r.sender_photo_url, // null se ancora anonimo
     createdAt: r.created_at,
     // Solo per quelle accettate ma non ancora riscattate — serve al
     // pulsante "Riscatta ora" nella lista, per aprire il sigillo
