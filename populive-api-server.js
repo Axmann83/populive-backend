@@ -650,13 +650,15 @@ app.get('/api/venues/:venueId/drinks', ah(async (req, res) => {
 app.post('/api/pulses/:pulseId/redeem', ah(async (req, res) => {
   const { redeemCode, venueId } = req.body;
 
-  // Il locale del riscatto è OBBLIGATORIO — e ora deve corrispondere
+  // Il locale del riscatto è OBBLIGATORIO — e deve corrispondere
   // ESATTAMENTE al locale in cui il Pulse è stato ricevuto: chi lo
-  // riceve deve spenderlo lì o perderlo, non può portarselo dietro
-  // in un altro locale. Più semplice per la contabilità (nessun
-  // dubbio su a chi girare la commissione) e un incentivo in più
-  // per il locale (chi non vuole perdere il regalo deve consumare
-  // lì prima di andarsene altrove).
+  // riceve può ritirarlo SOLO lì, non altrove. Aggiornato il 14/8:
+  // andarsene in un altro locale NON fa più perdere la Pulse per
+  // sempre (prima sì) — resta semplicemente non ritirabile finché
+  // non si torna nel locale giusto, anche giorni dopo. Più semplice
+  // per la contabilità (nessun dubbio su a chi girare la
+  // commissione) e un incentivo in più per il locale a farsi
+  // rivedere da chi vuole godersi il regalo.
   if (!venueId) {
     return res.json({ success: false, reason: 'venue_required_for_redeem' });
   }
