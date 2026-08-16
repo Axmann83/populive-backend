@@ -631,6 +631,15 @@ async function respondToPulse({ pulseId, receiverId, action }, { db, io }) {
       UPDATE pulses SET status = $1 WHERE id = $2
     `, [action === 'reject' ? 'rejected' : 'ignored', pulseId]);
 
+    // Rimborso SOLO per il rifiuto esplicito — è una decisione chiara
+    // e definitiva, nessun motivo di aspettare. Per "ignora" invece
+    // si aspetta che la persona lasci davvero il locale (v. STEP 2.5
+    // in populive-checkin-logic.js), lasciandole una finestra vera
+    // per ripensarci e accettarla comunque prima di quel momento.
+    if (action === 'reject') {
+      await refundPulseCredit({ userId: pulse.sender_id, pulseId: pulse.id }, { db });
+    }
+
     return { success: true, action, senderNotified: false };
   }
 
@@ -798,7 +807,7 @@ function generateRedeemCode() {
 async function getReceivedPulses({ userId }, { db }) {
   const pulses = await db.queryAll(`
     SELECT r.id, r.drink_type, r.tier, r.status, r.chat_unlocked, r.created_at, r.redeem_code,
-           v.name AS venue_name,
+           v.id AS venue_id, v.name AS venue_name,
            CASE WHEN r.tier = 'super' OR r.chat_unlocked THEN u.display_name ELSE NULL END AS sender_name
     FROM pulses r
     JOIN arena_sessions a ON a.id = r.arena_session_id
@@ -821,6 +830,7 @@ async function getReceivedPulses({ userId }, { db }) {
     drinkType: r.drink_type,
     tier: r.tier,
     status: r.status,
+    venueId: r.venue_id, // serve al frontend per capire se si è nel locale giusto per riscattare
     venueName: r.venue_name,
     senderName: r.sender_name, // null se ancora anonimo
     createdAt: r.created_at,
@@ -897,6 +907,66 @@ async function dismissPulseView({ userId, pulseId }, { db }) {
 async function clearAllPulseViews({ userId }, { db }) {
   await db.query(`UPDATE users SET pulses_cleared_before = now() WHERE id = $1`, [userId]);
   return { success: true };
+}
+
+/**
+ * ============================================================
+ * RIMBORSO — Pulse mai accettata dal destinatario
+ * ============================================================
+ * Decisione presa con l'utente (14/8): se il destinatario rifiuta o
+ * ignora e poi se ne va senza mai accettare, chi ha inviato non
+ * deve perdere per sempre quello che ha pagato — indipendentemente
+ * da come l'aveva pagata (credito gratis, pre-pagato, o pagamento
+ * diretto Stripe), il rimborso arriva sempre come UN credito Pulse
+ * pronto da rimandare a qualcun altro (mai contanti veri indietro —
+ * troppo complesso/costoso gestire un rimborso Stripe vero per
+ * ogni caso, e un credito è comunque equivalente in valore).
+ * Il MOMENTO del rimborso dipende dal tipo di "no":
+ *   - RIFIUTO esplicito → subito (v. sopra in respondToPulse)
+ *   - IGNORATA (o mai decisa) → solo quando il destinatario lascia
+ *     davvero quel locale (v. STEP 2.5 in populive-checkin-logic.js)
+ * Una Pulse già ACCETTATA non rientra mai qui — i soldi sono già
+ * "vinti" dal destinatario in quel momento, resta solo da capire
+ * DOVE può ritirarla (stessa regola per locale citata sopra).
+ * ============================================================
+ */
+async function refundPulseCredit({ userId }, { db }) {
+  await db.query(`UPDATE users SET paid_pulse_credits = paid_pulse_credits + 1 WHERE id = $1`, [userId]);
+}
+
+/**
+ * ============================================================
+ * SCADENZA A FINE SERATA — gemella del rimborso per cambio locale
+ * ============================================================
+ * Buco trovato dall'utente (14/8): l'unico modo di loggarsi è un QR
+ * code — se una persona resta nello stesso locale per sempre senza
+ * mai scansionarne un altro, una Pulse mai decisa (pending/ignored)
+ * potrebbe restare "in sospeso" per mesi, senza che scatti mai il
+ * rimborso legato al cambio locale. Questa funzione chiude quel
+ * buco: agganciata alla chiusura NATURALE della serata (quando
+ * l'Arena si spegne da sola a fine orario), non solo al cambio
+ * locale — chi non ha deciso nulla entro la fine della serata la
+ * perde comunque, punto. Stessa identica sorte delle Pulse GIÀ
+ * accettate però: quelle NON rientrano qui, restano valide a tempo
+ * indeterminato come deciso in precedenza — solo pending/ignored.
+ * ============================================================
+ */
+async function refundAbandonedPulsesForSession(arenaSessionId, { db }) {
+  const abandoned = await db.queryAll(`
+    SELECT id, sender_id FROM pulses
+    WHERE arena_session_id = $1 AND status IN ('pending', 'ignored')
+  `, [arenaSessionId]);
+
+  for (const p of abandoned) {
+    await refundPulseCredit({ userId: p.sender_id }, { db });
+  }
+
+  if (abandoned.length > 0) {
+    await db.query(`
+      UPDATE pulses SET status = 'expired'
+      WHERE id = ANY($1)
+    `, [abandoned.map((p) => p.id)]);
+  }
 }
 
 /**
@@ -1092,4 +1162,4 @@ async function clearAllNotifications({ userId }, { db }) {
   return { success: true };
 }
 
-module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createPulseRecord, respondToPulse, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedPulses, getSentPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews };
+module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createPulseRecord, respondToPulse, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedPulses, getSentPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews, refundPulseCredit, refundAbandonedPulsesForSession };
