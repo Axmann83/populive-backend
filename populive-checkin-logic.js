@@ -254,7 +254,8 @@ async function getAllVenuesForMap({}, { db }) {
       COALESCE(c.male_count, 0) AS male_count,
       COALESCE(c.female_count, 0) AS female_count,
       COALESCE(c.other_count, 0) AS other_count,
-      COALESCE(a.is_active, false) AS arena_active
+      COALESCE(a.is_active, false) AS arena_active,
+      a.id AS arena_session_id
     FROM venues v
     LEFT JOIN arena_sessions a
       ON a.venue_id = v.id AND a.session_date = current_business_date(v.id)
@@ -303,6 +304,7 @@ async function getAllVenuesForMap({}, { db }) {
       isPartner: true,
       checkinCount: parseInt(v.checkin_count),
       arenaActive: v.arena_active,
+      arenaSessionId: v.arena_active ? v.arena_session_id : null,
       // Percentuali calcolate SOLO su chi ha condiviso — se nessuno
       // lo ha fatto, il frontend semplicemente non mostra questa
       // parte (sharedTotal = 0 lo segnala chiaramente), stessa
