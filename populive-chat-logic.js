@@ -48,13 +48,17 @@ async function sendMessage({ conversationId, senderId, body }, { db, io }) {
 
   const receiverId = conv.user_a_id === senderId ? conv.user_b_id : conv.user_a_id;
 
-  // Il blocco vale anche qui: se una delle due parti ha bloccato
-  // l'altra nel frattempo (es. da un'altra interazione), niente
-  // nuovo messaggio passa.
-  const blocked = await db.query(`
-    SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2
-  `, [receiverId, senderId]);
-  if (blocked) return { success: false, reason: 'blocked' };
+  // NIENTE controllo blocchi qui apposta (bug vero trovato dal
+  // vivo, 22/8): una conversazione già aperta È di per sé
+  // l'autorizzazione a parlare — è nata proprio da un match vero.
+  // Il blocco permanente bidirezionale aggiunto la notte scorsa
+  // contro l'abuso dei punti (blockBothDirectionsPermanently, in
+  // populive-interactions-logic.js) scatta ESATTAMENTE nello stesso
+  // momento in cui si apre la chat, dato che entrambi nascono dalla
+  // stessa accettazione — controllarlo anche qui avrebbe reso ogni
+  // singola chat muta fin dal primo messaggio, per chiunque. Quel
+  // blocco serve a impedire NUOVE interazioni (Like/Superlike/
+  // Pulse), mai i messaggi di una chat già esistente.
 
   if (!body || body.trim().length === 0 || body.length > 1000) {
     return { success: false, reason: 'invalid_message' };
