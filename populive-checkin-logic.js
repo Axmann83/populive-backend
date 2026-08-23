@@ -107,6 +107,32 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
     `, [abandonedPulses.map((p) => p.id)]);
   }
 
+  // Stessa identica regola, estesa ai Superlike (22/8) — scoperto
+  // che il rimborso di quella sera era stato costruito SOLO per la
+  // Pulse, mai per il Superlike, nonostante lo stesso identico
+  // principio ("un rifiuto/mai deciso non deve far perdere il
+  // credito per sempre") valga per entrambi allo stesso modo.
+  const abandonedSuperlikes = await db.queryAll(`
+    SELECT i.id, i.sender_id
+    FROM interactions i
+    JOIN arena_sessions a ON a.id = i.arena_session_id
+    WHERE i.receiver_id = $1
+      AND i.type = 'superlike'
+      AND i.status IN ('sent', 'ignored')
+      AND a.venue_id != $2
+  `, [userId, venueId]);
+
+  for (const i of abandonedSuperlikes) {
+    await db.query(`UPDATE users SET superlike_balance = superlike_balance + 1 WHERE id = $1`, [i.sender_id]);
+  }
+
+  if (abandonedSuperlikes.length > 0) {
+    await db.query(`
+      UPDATE interactions SET status = 'expired'
+      WHERE id = ANY($1)
+    `, [abandonedSuperlikes.map((i) => i.id)]);
+  }
+
   // ------------------------------------------------------------
   // STEP 3 — Aggiornare lo stato "vivo" in Redis
   // ------------------------------------------------------------
