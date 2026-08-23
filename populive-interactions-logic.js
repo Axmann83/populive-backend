@@ -278,6 +278,17 @@ async function respondToSuperlike({ interactionId, receiverId, action }, { db, i
     await db.query(`
       UPDATE interactions SET status = $1 WHERE id = $2
     `, [action === 'reject' ? 'rejected' : 'ignored', interactionId]);
+
+    // Stesso principio già applicato alla Pulse (14/8): un rifiuto
+    // esplicito è una decisione chiara e definitiva, il credito
+    // torna indietro subito. "Ignora" invece aspetta che il
+    // destinatario lasci davvero il locale — v. STEP 2.5 in
+    // populive-checkin-logic.js, esteso per coprire anche i
+    // Superlike, non solo le Pulse.
+    if (action === 'reject') {
+      await db.query(`UPDATE users SET superlike_balance = superlike_balance + 1 WHERE id = $1`, [interaction.sender_id]);
+    }
+
     return { success: true, action, senderNotified: false };
   }
 
@@ -979,21 +990,34 @@ async function clearAllPulseViews({ userId }, { db }) {
  * cambio di serata.
  * ============================================================
  */
-async function blockBothDirectionsPermanently({ userAId, userBId }, { db }) {
+async function blockBothDirectionsPermanently({ userAId, userBId, reason = 'match' }, { db }) {
+  // Gerarchia di forza tra i motivi: rifiuto (già per sé un "no"
+  // definitivo) non torna mai indietro a niente di più debole; un
+  // blocco manuale dalla chat vince su un semplice match (nato solo
+  // per impedire la ripetizione di punti, non un vero "non voglio
+  // più vederti").
   await db.query(`
-    INSERT INTO blocks (blocker_id, blocked_id, arena_session_id, reason) VALUES ($1, $2, NULL, 'match')
+    INSERT INTO blocks (blocker_id, blocked_id, arena_session_id, reason) VALUES ($1, $2, NULL, $3)
     ON CONFLICT (blocker_id, blocked_id) DO UPDATE SET
       arena_session_id = NULL,
-      reason = CASE WHEN blocks.reason = 'rejection' THEN 'rejection' ELSE 'match' END,
+      reason = CASE
+        WHEN blocks.reason = 'rejection' THEN 'rejection'
+        WHEN blocks.reason = 'user_blocked' OR $3 = 'user_blocked' THEN 'user_blocked'
+        ELSE $3
+      END,
       created_at = now()
-  `, [userAId, userBId]);
+  `, [userAId, userBId, reason]);
   await db.query(`
-    INSERT INTO blocks (blocker_id, blocked_id, arena_session_id, reason) VALUES ($1, $2, NULL, 'match')
+    INSERT INTO blocks (blocker_id, blocked_id, arena_session_id, reason) VALUES ($1, $2, NULL, $3)
     ON CONFLICT (blocker_id, blocked_id) DO UPDATE SET
       arena_session_id = NULL,
-      reason = CASE WHEN blocks.reason = 'rejection' THEN 'rejection' ELSE 'match' END,
+      reason = CASE
+        WHEN blocks.reason = 'rejection' THEN 'rejection'
+        WHEN blocks.reason = 'user_blocked' OR $3 = 'user_blocked' THEN 'user_blocked'
+        ELSE $3
+      END,
       created_at = now()
-  `, [userBId, userAId]);
+  `, [userBId, userAId, reason]);
 }
 
 async function refundPulseCredit({ userId }, { db }) {
@@ -1056,9 +1080,48 @@ async function refundAbandonedPulsesForSession(arenaSessionId, { db }) {
 async function getPermanentlyBlockedPairUserIds({ userId }, { db }) {
   const rows = await db.queryAll(`
     SELECT blocker_id, blocked_id FROM blocks
-    WHERE (blocker_id = $1 OR blocked_id = $1) AND arena_session_id IS NULL AND reason = 'rejection'
+    WHERE (blocker_id = $1 OR blocked_id = $1) AND arena_session_id IS NULL AND reason IN ('rejection', 'user_blocked')
   `, [userId]);
   return [...new Set(rows.map((r) => (r.blocker_id === userId ? r.blocked_id : r.blocker_id)))];
+}
+
+/**
+ * ============================================================
+ * BLOCCA DALLA CHAT — richiesta esplicita dell'utente (22/8)
+ * ============================================================
+ * Consolidamento di due idee future citate insieme: un vero
+ * bottone "Blocca" dentro la chat, che copre anche la
+ * "cancellazione della chat" (bloccare qualcuno chiude per forza
+ * anche la conversazione in corso — non avrebbe senso restasse
+ * aperta con chi si è appena bloccato).
+ * Blocco SEMPRE bidirezionale (a differenza del rifiuto, che è a
+ * senso unico) — un blocco manuale è una scelta forte e deliberata,
+ * nessuna delle due parti deve più poter contattare l'altra.
+ * ============================================================
+ */
+async function blockUserFromChat({ conversationId, blockerId }, { db, io }) {
+  const conv = await db.query(`SELECT * FROM chat_conversations WHERE id = $1`, [conversationId]);
+  if (!conv) return { success: false, reason: 'conversation_not_found' };
+  if (conv.user_a_id !== blockerId && conv.user_b_id !== blockerId) {
+    return { success: false, reason: 'not_a_participant' };
+  }
+
+  const otherUserId = conv.user_a_id === blockerId ? conv.user_b_id : conv.user_a_id;
+
+  await blockBothDirectionsPermanently({ userAId: blockerId, userBId: otherUserId, reason: 'user_blocked' }, { db });
+
+  if (!conv.closed_at) {
+    await db.query(`UPDATE chat_conversations SET closed_at = now() WHERE id = $1`, [conversationId]);
+  }
+
+  // Notifica alla persona bloccata che la chat si è chiusa — MAI
+  // dire esplicitamente "sei stato bloccato" (potrebbe provocare
+  // una reazione ostile), stesso principio già usato per rifiuto/
+  // sospeso: un "no" silenzioso, mai annunciato con enfasi.
+  io.to(`user_${otherUserId}`).emit('chat_closed', { conversationId, reason: 'blocked' });
+  io.to(`user_${blockerId}`).emit('chat_closed', { conversationId, reason: 'blocked' });
+
+  return { success: true };
 }
 
 /**
@@ -1254,4 +1317,4 @@ async function clearAllNotifications({ userId }, { db }) {
   return { success: true };
 }
 
-module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createPulseRecord, respondToPulse, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedPulses, getSentPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews, refundPulseCredit, refundAbandonedPulsesForSession, getPermanentlyBlockedPairUserIds };
+module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createPulseRecord, respondToPulse, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedPulses, getSentPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews, refundPulseCredit, refundAbandonedPulsesForSession, getPermanentlyBlockedPairUserIds, blockUserFromChat };
