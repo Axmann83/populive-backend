@@ -267,12 +267,14 @@ async function respondToSuperlike({ interactionId, receiverId, action }, { db, i
     // arriva un nuovo "ignora" più avanti — resta sempre il più
     // forte dei due mai deciso finora.
     const newArenaSessionId = action === 'reject' ? null : interaction.arena_session_id;
+    const newReason = action === 'reject' ? 'rejection' : null;
     await db.query(`
-      INSERT INTO blocks (blocker_id, blocked_id, arena_session_id) VALUES ($1, $2, $3)
+      INSERT INTO blocks (blocker_id, blocked_id, arena_session_id, reason) VALUES ($1, $2, $3, $4)
       ON CONFLICT (blocker_id, blocked_id) DO UPDATE SET
         arena_session_id = CASE WHEN blocks.arena_session_id IS NULL THEN NULL ELSE EXCLUDED.arena_session_id END,
+        reason = CASE WHEN blocks.reason = 'rejection' THEN 'rejection' ELSE COALESCE(EXCLUDED.reason, blocks.reason) END,
         created_at = now()
-    `, [receiverId, interaction.sender_id, newArenaSessionId]);
+    `, [receiverId, interaction.sender_id, newArenaSessionId, newReason]);
     await db.query(`
       UPDATE interactions SET status = $1 WHERE id = $2
     `, [action === 'reject' ? 'rejected' : 'ignored', interactionId]);
@@ -630,13 +632,15 @@ async function respondToPulse({ pulseId, receiverId, action }, { db, io }) {
     // per questa serata — mai un blocco già permanente che torna
     // indietro, qualunque cosa arrivi dopo.
     const newArenaSessionId = action === 'reject' ? null : pulse.arena_session_id;
+    const newReason = action === 'reject' ? 'rejection' : null;
     await db.query(`
-      INSERT INTO blocks (blocker_id, blocked_id, arena_session_id)
-      VALUES ($1, $2, $3)
+      INSERT INTO blocks (blocker_id, blocked_id, arena_session_id, reason)
+      VALUES ($1, $2, $3, $4)
       ON CONFLICT (blocker_id, blocked_id) DO UPDATE SET
         arena_session_id = CASE WHEN blocks.arena_session_id IS NULL THEN NULL ELSE EXCLUDED.arena_session_id END,
+        reason = CASE WHEN blocks.reason = 'rejection' THEN 'rejection' ELSE COALESCE(EXCLUDED.reason, blocks.reason) END,
         created_at = now()
-    `, [receiverId, pulse.sender_id, newArenaSessionId]);
+    `, [receiverId, pulse.sender_id, newArenaSessionId, newReason]);
 
     await db.query(`
       UPDATE pulses SET status = $1 WHERE id = $2
@@ -977,12 +981,18 @@ async function clearAllPulseViews({ userId }, { db }) {
  */
 async function blockBothDirectionsPermanently({ userAId, userBId }, { db }) {
   await db.query(`
-    INSERT INTO blocks (blocker_id, blocked_id, arena_session_id) VALUES ($1, $2, NULL)
-    ON CONFLICT (blocker_id, blocked_id) DO UPDATE SET arena_session_id = NULL, created_at = now()
+    INSERT INTO blocks (blocker_id, blocked_id, arena_session_id, reason) VALUES ($1, $2, NULL, 'match')
+    ON CONFLICT (blocker_id, blocked_id) DO UPDATE SET
+      arena_session_id = NULL,
+      reason = CASE WHEN blocks.reason = 'rejection' THEN 'rejection' ELSE 'match' END,
+      created_at = now()
   `, [userAId, userBId]);
   await db.query(`
-    INSERT INTO blocks (blocker_id, blocked_id, arena_session_id) VALUES ($1, $2, NULL)
-    ON CONFLICT (blocker_id, blocked_id) DO UPDATE SET arena_session_id = NULL, created_at = now()
+    INSERT INTO blocks (blocker_id, blocked_id, arena_session_id, reason) VALUES ($1, $2, NULL, 'match')
+    ON CONFLICT (blocker_id, blocked_id) DO UPDATE SET
+      arena_session_id = NULL,
+      reason = CASE WHEN blocks.reason = 'rejection' THEN 'rejection' ELSE 'match' END,
+      created_at = now()
   `, [userBId, userAId]);
 }
 
@@ -1023,6 +1033,32 @@ async function refundAbandonedPulsesForSession(arenaSessionId, { db }) {
       WHERE id = ANY($1)
     `, [abandoned.map((p) => p.id)]);
   }
+}
+
+/**
+ * ============================================================
+ * INVISIBILITÀ RECIPROCA NEL RADAR DOPO UN BLOCCO PERMANENTE
+ * ============================================================
+ * Decisione presa con l'utente (22/8), suggerita da Giuseppe: un
+ * rifiuto crea un blocco permanente ma A SENSO UNICO (solo chi è
+ * stato rifiutato non può più scrivere a chi ha rifiutato — v.
+ * commento sopra in respondToPulse/respondToSuperlike). Per il
+ * RADAR però si è deciso diversamente: invisibilità RECIPROCA,
+ * indipendentemente da chi abbia rifiutato chi — altrimenti la
+ * persona rifiutata continuerebbe comunque a vedere chi l'ha
+ * rifiutata nello stesso locale, senza poterle scrivere, probabile
+ * fonte di imbarazzo/nervosismo proprio quanto il contrario.
+ * Ogni telefono filtra DA SÉ la propria lista del radar (più
+ * semplice e robusto che far scegliere al server, connessione per
+ * connessione, chi escludere da una trasmissione broadcast).
+ * ============================================================
+ */
+async function getPermanentlyBlockedPairUserIds({ userId }, { db }) {
+  const rows = await db.queryAll(`
+    SELECT blocker_id, blocked_id FROM blocks
+    WHERE (blocker_id = $1 OR blocked_id = $1) AND arena_session_id IS NULL AND reason = 'rejection'
+  `, [userId]);
+  return [...new Set(rows.map((r) => (r.blocker_id === userId ? r.blocked_id : r.blocker_id)))];
 }
 
 /**
@@ -1218,4 +1254,4 @@ async function clearAllNotifications({ userId }, { db }) {
   return { success: true };
 }
 
-module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createPulseRecord, respondToPulse, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedPulses, getSentPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews, refundPulseCredit, refundAbandonedPulsesForSession };
+module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createPulseRecord, respondToPulse, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedPulses, getSentPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews, refundPulseCredit, refundAbandonedPulsesForSession, getPermanentlyBlockedPairUserIds };
