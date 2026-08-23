@@ -20,7 +20,7 @@ const Redis = require('ioredis');
 const { setupWebSocket } = require('./populive-websocket-rooms');
 const { handleCheckin, createVirtualVenue, getAllVenuesForMap } = require('./populive-checkin-logic');
 const {
-  sendInteraction, trackProfileView, respondToPulse, attemptGuess, respondToSuperlike, getReceivedPulses, getSentPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews,
+  sendInteraction, trackProfileView, respondToPulse, attemptGuess, respondToSuperlike, getReceivedPulses, getSentPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews, getPermanentlyBlockedPairUserIds,
 } = require('./populive-interactions-logic');
 const { initiatePulsePurchase, initiatePurchase, initiateVenuePulseCreditsPurchase, handleStripeWebhook } = require('./populive-payments-logic');
 const { sendMessage, getMessages, setChatKeepPreference, getMyActiveConversations, markConversationRead, getUnreadChatCount } = require('./populive-chat-logic');
@@ -306,6 +306,13 @@ app.post('/api/profile-views', requireOnboarded, ah(async (req, res) => {
 app.get('/api/users/:userId/pulse-balance', requireOnboarded, ah(async (req, res) => {
   const result = await getPulseBalance({ userId: req.userId }, { db });
   res.json(result);
+}));
+
+app.get('/api/users/:userId/blocked-pairs', requireOnboarded, ah(async (req, res) => {
+  // Solo il proprietario può vedere la propria lista — usiamo
+  // sempre req.userId (dal token verificato), mai l'URL scritto a mano.
+  const blockedUserIds = await getPermanentlyBlockedPairUserIds({ userId: req.userId }, deps);
+  res.json({ success: true, blockedUserIds });
 }));
 
 app.get('/api/users/:userId/pulses', requireOnboarded, ah(async (req, res) => {
