@@ -20,7 +20,7 @@ const Redis = require('ioredis');
 const { setupWebSocket } = require('./populive-websocket-rooms');
 const { handleCheckin, createVirtualVenue, getAllVenuesForMap } = require('./populive-checkin-logic');
 const {
-  sendInteraction, trackProfileView, respondToPulse, attemptGuess, respondToSuperlike, getReceivedPulses, getSentPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews, getPermanentlyBlockedPairUserIds,
+  sendInteraction, trackProfileView, respondToPulse, attemptGuess, respondToSuperlike, getReceivedPulses, getSentPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews, getPermanentlyBlockedPairUserIds, blockUserFromChat,
 } = require('./populive-interactions-logic');
 const { initiatePulsePurchase, initiatePurchase, initiateVenuePulseCreditsPurchase, handleStripeWebhook } = require('./populive-payments-logic');
 const { sendMessage, getMessages, setChatKeepPreference, getMyActiveConversations, markConversationRead, getUnreadChatCount } = require('./populive-chat-logic');
@@ -797,6 +797,11 @@ app.post('/api/chat/:conversationId/mark-read', requireOnboarded, ah(async (req,
 app.get('/api/users/:userId/unread-chat-count', requireOnboarded, ah(async (req, res) => {
   const count = await getUnreadChatCount({ userId: req.userId }, deps);
   res.json({ success: true, count });
+}));
+
+app.post('/api/chat/:conversationId/block', requireOnboarded, ah(async (req, res) => {
+  const result = await blockUserFromChat({ conversationId: req.params.conversationId, blockerId: req.userId }, deps);
+  res.json(result);
 }));
 
 app.post('/api/chat/:conversationId/keep-preference', requireOnboarded, ah(async (req, res) => {
