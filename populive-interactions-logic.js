@@ -1057,6 +1057,24 @@ async function refundAbandonedPulsesForSession(arenaSessionId, { db }) {
       WHERE id = ANY($1)
     `, [abandoned.map((p) => p.id)]);
   }
+
+  // Stessa regola estesa ai Superlike (22/8) — v. spiegazione
+  // completa in populive-checkin-logic.js, STEP 2.5.
+  const abandonedSuperlikes = await db.queryAll(`
+    SELECT id, sender_id FROM interactions
+    WHERE arena_session_id = $1 AND type = 'superlike' AND status IN ('sent', 'ignored')
+  `, [arenaSessionId]);
+
+  for (const i of abandonedSuperlikes) {
+    await db.query(`UPDATE users SET superlike_balance = superlike_balance + 1 WHERE id = $1`, [i.sender_id]);
+  }
+
+  if (abandonedSuperlikes.length > 0) {
+    await db.query(`
+      UPDATE interactions SET status = 'expired'
+      WHERE id = ANY($1)
+    `, [abandonedSuperlikes.map((i) => i.id)]);
+  }
 }
 
 /**
