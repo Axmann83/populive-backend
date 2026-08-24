@@ -1095,6 +1095,143 @@ async function refundAbandonedPulsesForSession(arenaSessionId, { db }) {
  * connessione, chi escludere da una trasmissione broadcast).
  * ============================================================
  */
+/**
+ * ============================================================
+ * SCHERMATA "LIKE" — Ricevuti (23/8, nuova architettura)
+ * ============================================================
+ * SOLO le interazioni ricevute ancora da decidere — un Like mai
+ * diventato match (resta anonimo, un semplice "hai un ammiratore",
+ * nessuna azione possibile su di lui), un Superlike ancora
+ * status='sent', una Pulse ancora status='pending' in qualunque
+ * variante. Rispetta le stesse regole di anonimato già in vigore:
+ * solo Superlike e Pulse+Superlike svelano subito l'identità.
+ * ============================================================
+ */
+async function getPendingReceivedInteractions({ userId }, { db }) {
+  const rows = await db.queryAll(`
+    (
+      SELECT i.id::text AS id, 'like' AS kind, i.created_at, v.name AS venue_name,
+             NULL AS drink_type, NULL AS sender_id, NULL AS sender_name, NULL AS sender_photo
+      FROM interactions i
+      JOIN arena_sessions a ON a.id = i.arena_session_id
+      JOIN venues v ON v.id = a.venue_id
+      WHERE i.type = 'like' AND i.receiver_id = $1
+        AND NOT EXISTS (
+          SELECT 1 FROM interactions r
+          WHERE r.sender_id = $1 AND r.receiver_id = i.sender_id AND r.type = 'like'
+        )
+    )
+    UNION ALL
+    (
+      SELECT i.id::text AS id, 'superlike' AS kind, i.created_at, v.name AS venue_name,
+             NULL AS drink_type, u.id AS sender_id, u.display_name AS sender_name, u.photo_url AS sender_photo
+      FROM interactions i
+      JOIN arena_sessions a ON a.id = i.arena_session_id
+      JOIN venues v ON v.id = a.venue_id
+      JOIN users u ON u.id = i.sender_id
+      WHERE i.type = 'superlike' AND i.receiver_id = $1 AND i.status = 'sent'
+    )
+    UNION ALL
+    (
+      SELECT p.id::text AS id, ('pulse_' || p.tier) AS kind, p.created_at, v.name AS venue_name,
+             p.drink_type,
+             CASE WHEN p.tier = 'super' THEN u.id ELSE NULL END,
+             CASE WHEN p.tier = 'super' THEN u.display_name ELSE NULL END,
+             CASE WHEN p.tier = 'super' THEN u.photo_url ELSE NULL END
+      FROM pulses p
+      JOIN arena_sessions a ON a.id = p.arena_session_id
+      JOIN venues v ON v.id = a.venue_id
+      JOIN users u ON u.id = p.sender_id
+      WHERE p.receiver_id = $1 AND p.status = 'pending'
+    )
+    ORDER BY created_at DESC
+    LIMIT 100
+  `, [userId]);
+
+  return rows.map((r) => ({
+    id: r.id,
+    kind: r.kind,
+    createdAt: r.created_at,
+    venueName: r.venue_name,
+    drinkType: r.drink_type,
+    sender: r.sender_id ? { userId: r.sender_id, displayName: r.sender_name, photoUrl: r.sender_photo } : null,
+  }));
+}
+
+/**
+ * ============================================================
+ * SCHERMATA "LIKE" — Inviati (23/8, nuova architettura)
+ * ============================================================
+ * TUTTE le interazioni inviate (non solo quelle in sospeso — anche
+ * accettate/rifiutate/riscattate), sempre con identità del
+ * destinatario visibile — l'ha scelto la persona stessa, nessun
+ * anonimato da rispettare qui. Pensata per la "vista popolarità":
+ * tornare facilmente sui profili di chi ha colpito, non solo per
+ * decidere su qualcosa in sospeso.
+ * ============================================================
+ */
+async function getSentInteractionsHistory({ userId }, { db }) {
+  const rows = await db.queryAll(`
+    (
+      SELECT i.id::text AS id, i.type AS kind, i.status, i.created_at,
+             v.name AS venue_name, NULL AS drink_type,
+             u.id AS other_user_id, u.display_name AS other_name, u.photo_url AS other_photo
+      FROM interactions i
+      JOIN arena_sessions a ON a.id = i.arena_session_id
+      JOIN venues v ON v.id = a.venue_id
+      JOIN users u ON u.id = i.receiver_id
+      WHERE i.sender_id = $1
+    )
+    UNION ALL
+    (
+      SELECT p.id::text AS id, ('pulse_' || p.tier) AS kind, p.status, p.created_at,
+             v.name AS venue_name, p.drink_type,
+             u.id AS other_user_id, u.display_name AS other_name, u.photo_url AS other_photo
+      FROM pulses p
+      JOIN arena_sessions a ON a.id = p.arena_session_id
+      JOIN venues v ON v.id = a.venue_id
+      JOIN users u ON u.id = p.receiver_id
+      WHERE p.sender_id = $1
+    )
+    ORDER BY created_at DESC
+    LIMIT 150
+  `, [userId]);
+
+  return rows.map((r) => ({
+    id: r.id,
+    kind: r.kind,
+    status: r.status,
+    createdAt: r.created_at,
+    venueName: r.venue_name,
+    drinkType: r.drink_type,
+    otherPerson: { userId: r.other_user_id, displayName: r.other_name, photoUrl: r.other_photo },
+  }));
+}
+
+/**
+ * Pallino sulla nuova icona "Like" — quante interazioni ricevute
+ * ancora da decidere sono arrivate da quando si è aperta davvero
+ * questa schermata l'ultima volta. Colonna dedicata
+ * like_center_last_seen_at, separata da notifications_last_seen_at
+ * (che ora riguarda solo il Centro Notifiche ripensato).
+ */
+async function getUnseenLikeCenterCount({ userId }, { db }) {
+  const row = await db.query(`
+    SELECT COUNT(*) AS total FROM (
+      (SELECT id, created_at FROM interactions WHERE type IN ('like', 'superlike') AND receiver_id = $1)
+      UNION ALL
+      (SELECT id, created_at FROM pulses WHERE receiver_id = $1)
+    ) combined
+    WHERE created_at > (SELECT like_center_last_seen_at FROM users WHERE id = $1)
+  `, [userId]);
+  return parseInt(row?.total) || 0;
+}
+
+async function markLikeCenterSeen({ userId }, { db }) {
+  await db.query(`UPDATE users SET like_center_last_seen_at = now() WHERE id = $1`, [userId]);
+  return { success: true };
+}
+
 async function getPermanentlyBlockedPairUserIds({ userId }, { db }) {
   const rows = await db.queryAll(`
     SELECT blocker_id, blocked_id FROM blocks
@@ -1163,54 +1300,47 @@ async function getPulseBalance({ userId }, { db }) {
 
 /**
  * ============================================================
- * CENTRO NOTIFICHE — storico cronologico completo
+ * CENTRO NOTIFICHE — ora SOLO storico degli esiti (23/8)
  * ============================================================
- * Unisce Like, Superlike e Pulse (tutte le varianti) — sia inviate
- * sia ricevute — in un unico elenco ordinato per data. Rispetta le
- * STESSE regole di anonimato già in vigore ovunque nell'app: mai
- * svelare a chi riceve un Like/Pulse anonimo chi sia stato, a meno
- * che non sia scattato davvero un match/sblocco chat — le proprie
- * azioni inviate invece sono sempre visibili per intero (le ha
- * scelte la persona stessa).
+ * Ristretto su richiesta esplicita, dopo l'introduzione della
+ * nuova schermata "Like" (Ricevuti/Inviati): le interazioni
+ * INVIATE e quelle RICEVUTE ancora da decidere vivono ora
+ * ESCLUSIVAMENTE lì (v. getPendingReceivedInteractions e
+ * getSentInteractionsHistory più sotto) — qui restano solo due
+ * cose: i match confermati, e le ricevute che ERANO in sospeso e
+ * ora hanno un esito finale (accettata/rifiutata/riscattata/
+ * scaduta). Un puro registro di ciò che è già successo, mai più
+ * un elenco misto di "da fare" e "già fatto" insieme.
  *
- * Un match da Like reciproco NON compare come due righe separate
- * ("hai mandato un Like" + "hai ricevuto un Like, svelato") — le
- * due righe originali vengono escluse ed è sostituita da UN'UNICA
- * notifica di festeggiamento ("Hai matchato con [nome]!"), stile
- * Facebook/Tinder — molto più pulito che raccontare due volte lo
- * stesso evento da due lati diversi. Rilevato direttamente dai due
- * Like reciproci nella tabella interactions (non dalla chat
- * associata) — una stessa coppia può già avere una conversazione
- * aperta da un motivo diverso (es. un Superlike precedente), che
- * verrebbe solo RIUSATA per il match successivo invece di crearne
- * una nuova, rendendo inaffidabile un controllo basato su quella.
+ * Rispetta le STESSE regole di anonimato già in vigore ovunque
+ * nell'app. Un match da Like reciproco NON compare come due righe
+ * separate — le due righe originali vengono escluse ed è
+ * sostituita da UN'UNICA notifica di festeggiamento.
  * ============================================================
  */
 async function getInteractionHistory({ userId }, { db }) {
   const rows = await db.queryAll(`
     WITH combined AS (
       (
+        -- Superlike ricevuti, ma solo quelli ORMAI decisi — quelli
+        -- ancora 'sent' vivono solo nella nuova schermata Like.
         SELECT i.id::text AS id, i.type AS kind, i.status, i.created_at,
-               CASE WHEN i.sender_id = $1 THEN 'sent' ELSE 'received' END AS direction,
-               CASE WHEN i.sender_id = $1 THEN i.receiver_id ELSE i.sender_id END AS other_user_id,
+               'received' AS direction,
+               i.sender_id AS other_user_id,
                NULL AS drink_type, NULL AS chat_unlocked
         FROM interactions i
-        WHERE (i.sender_id = $1 OR i.receiver_id = $1)
-          AND NOT (
-            i.type = 'like' AND EXISTS(
-              SELECT 1 FROM interactions r
-              WHERE r.sender_id = i.receiver_id AND r.receiver_id = i.sender_id AND r.type = 'like'
-            )
-          )
+        WHERE i.type = 'superlike' AND i.receiver_id = $1 AND i.status != 'sent'
       )
       UNION ALL
       (
+        -- Pulse ricevute, ma solo quelle ORMAI decise — quelle
+        -- ancora 'pending' vivono solo nella nuova schermata Like.
         SELECT p.id::text AS id, ('pulse_' || p.tier) AS kind, p.status, p.created_at,
-               CASE WHEN p.sender_id = $1 THEN 'sent' ELSE 'received' END AS direction,
-               CASE WHEN p.sender_id = $1 THEN p.receiver_id ELSE p.sender_id END AS other_user_id,
+               'received' AS direction,
+               p.sender_id AS other_user_id,
                p.drink_type, p.chat_unlocked
         FROM pulses p
-        WHERE p.sender_id = $1 OR p.receiver_id = $1
+        WHERE p.receiver_id = $1 AND p.status != 'pending'
       )
       UNION ALL
       (
@@ -1230,9 +1360,6 @@ async function getInteractionHistory({ userId }, { db }) {
         GROUP BY other_user_id
       )
     )
-    -- Nascosti, non cancellati: sia il "ripulisci tutto" (tutto ciò
-    -- che è più vecchio del momento in cui è stato premuto) sia le
-    -- singole "x" mai tolgono le righe vere sottostanti.
     SELECT c.* FROM combined c
     WHERE (
       (SELECT notifications_cleared_before FROM users WHERE id = $1) IS NULL
@@ -1246,16 +1373,14 @@ async function getInteractionHistory({ userId }, { db }) {
     LIMIT 150
   `, [userId]);
 
-  // Chi va svelato: sempre le proprie azioni inviate E i match (per
-  // definizione un match svela già l'identità a entrambi); per il
-  // resto ricevuto, solo Superlike/Pulse+Superlike (mostrano sempre
-  // l'identità, coerente col resto dell'app) o una Pulse anonima
-  // con chat_unlocked vero. Un Like ricevuto SENZA match resta
-  // sempre anonimo qui — se avesse portato a un match, non
-  // comparirebbe più come riga a sé (v. sopra, escluso alla fonte).
+  // Chi va svelato: i match (svelano già l'identità a entrambi per
+  // definizione) e i Superlike/Pulse+Superlike ricevuti (mostrano
+  // sempre l'identità, coerente col resto dell'app), o una Pulse
+  // anonima con chat_unlocked vero. Qui non esiste più il caso
+  // "inviato" — quello vive solo nella nuova schermata Like.
   const revealed = rows.map((r) => {
     let reveal = false;
-    if (r.direction === 'sent' || r.direction === 'match') {
+    if (r.direction === 'match') {
       reveal = true;
     } else if (r.kind === 'superlike' || r.kind === 'pulse_super') {
       reveal = true;
@@ -1271,18 +1396,52 @@ async function getInteractionHistory({ userId }, { db }) {
     const profileRows = await db.queryAll(`
       SELECT id, display_name, photo_url FROM users WHERE id = ANY($1)
     `, [idsToFetch]);
-    profileRows.forEach((p) => { profiles[p.id] = { displayName: p.display_name, photoUrl: p.photo_url }; });
+    profileRows.forEach((p) => { profiles[p.id] = { userId: p.id, displayName: p.display_name, photoUrl: p.photo_url }; });
   }
 
-  return revealed.map((r) => ({
-    id: r.id,
-    kind: r.kind, // 'like' | 'superlike' | 'pulse_standalone' | 'pulse_like' | 'pulse_super' | 'like_match'
-    status: r.status,
-    direction: r.direction, // 'sent' | 'received' | 'match'
-    createdAt: r.created_at,
-    drinkType: r.drink_type,
-    otherPerson: r.reveal ? (profiles[r.other_user_id] || null) : null,
-  }));
+  // Per ogni match Like+Like: dov'è la conversazione vera (se
+  // esiste già) e se questa persona l'ha già "fatta avanzare" verso
+  // la Chat — aprendola lei stessa, o perché l'altra parte le ha
+  // già scritto. Finché nessuna delle due cose succede, il match
+  // resta un elemento del Centro Notifiche, non ancora una vera
+  // conversazione da trovare sotto l'icona Chat (stile Tinder/
+  // Hinge: "Nuovi match" vs "Messaggi").
+  const matchEntries = revealed.filter((r) => r.kind === 'like_match');
+  const chatInfoByOtherUser = {};
+  if (matchEntries.length > 0) {
+    const otherIds = matchEntries.map((r) => r.other_user_id);
+    const convRows = await db.queryAll(`
+      SELECT id, user_a_id, user_b_id, user_a_last_read_at, user_b_last_read_at,
+             EXISTS(SELECT 1 FROM chat_messages m WHERE m.conversation_id = chat_conversations.id) AS has_messages
+      FROM chat_conversations
+      WHERE (user_a_id = $1 AND user_b_id = ANY($2)) OR (user_b_id = $1 AND user_a_id = ANY($2))
+      ORDER BY created_at DESC
+    `, [userId, otherIds]);
+    convRows.forEach((c) => {
+      const otherId = c.user_a_id === userId ? c.user_b_id : c.user_a_id;
+      if (chatInfoByOtherUser[otherId]) return; // già trovata una più recente, teniamo quella
+      const myLastRead = c.user_a_id === userId ? c.user_a_last_read_at : c.user_b_last_read_at;
+      chatInfoByOtherUser[otherId] = {
+        conversationId: c.id,
+        graduated: !!myLastRead || !!c.has_messages,
+      };
+    });
+  }
+
+  return revealed
+    .filter((r) => !(r.kind === 'like_match' && chatInfoByOtherUser[r.other_user_id]?.graduated))
+    .map((r) => ({
+      id: r.id,
+      kind: r.kind, // 'like' | 'superlike' | 'pulse_standalone' | 'pulse_like' | 'pulse_super' | 'like_match'
+      status: r.status,
+      direction: r.direction, // 'sent' | 'received' | 'match'
+      createdAt: r.created_at,
+      drinkType: r.drink_type,
+      otherPerson: r.reveal ? (profiles[r.other_user_id] || null) : null,
+      // Solo per 'like_match' non ancora avanzato — dove aprire la
+      // chat quando la persona tocca la notifica.
+      conversationId: r.kind === 'like_match' ? (chatInfoByOtherUser[r.other_user_id]?.conversationId || null) : null,
+    }));
 }
 
 /**
@@ -1335,4 +1494,4 @@ async function clearAllNotifications({ userId }, { db }) {
   return { success: true };
 }
 
-module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createPulseRecord, respondToPulse, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedPulses, getSentPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews, refundPulseCredit, refundAbandonedPulsesForSession, getPermanentlyBlockedPairUserIds, blockUserFromChat };
+module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createPulseRecord, respondToPulse, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedPulses, getSentPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews, refundPulseCredit, refundAbandonedPulsesForSession, getPermanentlyBlockedPairUserIds, blockUserFromChat, getPendingReceivedInteractions, getSentInteractionsHistory, getUnseenLikeCenterCount, markLikeCenterSeen };
