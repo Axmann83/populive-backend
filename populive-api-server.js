@@ -20,7 +20,7 @@ const Redis = require('ioredis');
 const { setupWebSocket } = require('./populive-websocket-rooms');
 const { handleCheckin, createVirtualVenue, getAllVenuesForMap } = require('./populive-checkin-logic');
 const {
-  sendInteraction, trackProfileView, respondToPulse, attemptGuess, respondToSuperlike, getReceivedPulses, getSentPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews, getPermanentlyBlockedPairUserIds, blockUserFromChat,
+  sendInteraction, trackProfileView, respondToPulse, attemptGuess, respondToSuperlike, getReceivedPulses, getSentPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews, getPermanentlyBlockedPairUserIds, blockUserFromChat, getPendingReceivedInteractions, getSentInteractionsHistory, getUnseenLikeCenterCount, markLikeCenterSeen,
 } = require('./populive-interactions-logic');
 const { initiatePulsePurchase, initiatePurchase, initiateVenuePulseCreditsPurchase, handleStripeWebhook } = require('./populive-payments-logic');
 const { sendMessage, getMessages, setChatKeepPreference, getMyActiveConversations, markConversationRead, getUnreadChatCount } = require('./populive-chat-logic');
@@ -749,6 +749,26 @@ app.get('/api/users/:userId/interaction-history', requireOnboarded, ah(async (re
   // proprietario può vederli, mai un ID scritto a mano nell'indirizzo.
   const history = await getInteractionHistory({ userId: req.userId }, deps);
   res.json({ success: true, history });
+}));
+
+app.get('/api/users/:userId/pending-received-interactions', requireOnboarded, ah(async (req, res) => {
+  const items = await getPendingReceivedInteractions({ userId: req.userId }, deps);
+  res.json({ success: true, items });
+}));
+
+app.get('/api/users/:userId/sent-interactions-history', requireOnboarded, ah(async (req, res) => {
+  const items = await getSentInteractionsHistory({ userId: req.userId }, deps);
+  res.json({ success: true, items });
+}));
+
+app.get('/api/users/:userId/unseen-like-center-count', requireOnboarded, ah(async (req, res) => {
+  const count = await getUnseenLikeCenterCount({ userId: req.userId }, deps);
+  res.json({ success: true, count });
+}));
+
+app.post('/api/users/:userId/mark-like-center-seen', requireOnboarded, ah(async (req, res) => {
+  const result = await markLikeCenterSeen({ userId: req.userId }, deps);
+  res.json(result);
 }));
 
 app.get('/api/users/:userId/unseen-notification-count', requireOnboarded, ah(async (req, res) => {
