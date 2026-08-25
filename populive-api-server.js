@@ -279,7 +279,7 @@ app.post('/api/missions/:missionId/complete', requireOnboarded, ah(async (req, r
 // ------------------------------------------------------------
 app.get('/api/users/:userId/public-profile', requireOnboarded, ah(async (req, res) => {
   const { arenaSessionId } = req.query;
-  const result = await getPublicProfile({ userId: req.params.userId, arenaSessionId }, { db });
+  const result = await getPublicProfile({ userId: req.params.userId, arenaSessionId, viewerId: req.userId }, { db });
   res.json(result);
 }));
 
