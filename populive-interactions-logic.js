@@ -279,15 +279,14 @@ async function respondToSuperlike({ interactionId, receiverId, action }, { db, i
       UPDATE interactions SET status = $1 WHERE id = $2
     `, [action === 'reject' ? 'rejected' : 'ignored', interactionId]);
 
-    // Stesso principio già applicato alla Pulse (14/8): un rifiuto
-    // esplicito è una decisione chiara e definitiva, il credito
-    // torna indietro subito. "Ignora" invece aspetta che il
-    // destinatario lasci davvero il locale — v. STEP 2.5 in
-    // populive-checkin-logic.js, esteso per coprire anche i
-    // Superlike, non solo le Pulse.
-    if (action === 'reject') {
-      await db.query(`UPDATE users SET superlike_balance = superlike_balance + 1 WHERE id = $1`, [interaction.sender_id]);
-    }
+    // Nessun rimborso (25/8, decisione esplicita dell'utente, ripensata
+    // rispetto alla correzione del 22/8): il Superlike segue ora lo
+    // stesso principio di Tinder/Hinge — una volta inviato è sempre
+    // perso, qualunque sia l'esito (accettato/rifiutato/sospeso), a
+    // differenza della Pulse (che coinvolge un vero pagamento e quindi
+    // resta rimborsabile). Coerente con quanto già valeva da sempre
+    // per il Superlike allegato a un Pulse+Superlike, mai rimborsato
+    // nemmeno lui (refundPulseCredit tocca solo il credito Pulse).
 
     return { success: true, action, senderNotified: false };
   }
@@ -582,13 +581,17 @@ async function createPulseRecord({ senderId, receiverId, arenaSessionId, drinkNa
   // Il payload NON include mai l'identità del mittente per i tier
   // "standalone" e "like" (resta il backend, tramite sender_id nel
   // database, a saperlo — il frontend riceve solo ciò che è coerente
-  // con la variante scelta).
-  const superSenderProfile = tier === 'super' ? await getSenderProfile(senderId, { db }) : null;
+  // con la variante scelta). "simple" svela l'identità esattamente
+  // come "super" (25/8, stessa logica, semplicemente senza legame
+  // col Superlike) — un'offerta vera richiede che si sappia da chi
+  // arriva, decisione esplicita dell'utente.
+  const revealsIdentity = tier === 'super' || tier === 'simple';
+  const superSenderProfile = revealsIdentity ? await getSenderProfile(senderId, { db }) : null;
   io.to(`user_${receiverId}`).emit('pulse_received', {
     pulseId: pulse.id,
     tier,
     drinkType: drinkName,
-    senderId: tier === 'super' ? senderId : null,
+    senderId: revealsIdentity ? senderId : null,
     senderName: superSenderProfile?.displayName || null,
     senderPhotoUrl: superSenderProfile?.photoUrl || null,
     senderAvatarEmoji: superSenderProfile?.avatarEmoji || null,
@@ -677,20 +680,24 @@ async function respondToPulse({ pulseId, receiverId, action }, { db, io }) {
   // non condiziona mai il possesso della Pulse già accettata.
   if (action === 'accept') {
     const redeemCode = generateRedeemCode();
+    // "simple" si comporta esattamente come "super" qui: svela già
+    // subito, quindi l'accettazione apre la chat allo stesso modo
+    // (25/8) — l'unica differenza tra i due è a monte, nell'invio
+    // (nessun legame col saldo Superlike).
+    const opensChatOnAccept = pulse.tier === 'super' || pulse.tier === 'simple';
     await db.query(`
       UPDATE pulses
       SET status = 'accepted',
           chat_unlocked = $1,
           redeem_code = $2
       WHERE id = $3
-    `, [pulse.tier === 'super', redeemCode, pulseId]);
+    `, [opensChatOnAccept, redeemCode, pulseId]);
 
     // Anti-abuso punti: stesso principio già applicato a Like
     // reciproco e Superlike — accettare una Pulse (in QUALUNQUE
     // variante, anche standalone/+like) è un "sì" vero, non deve
     // poter essere ripetuto all'infinito solo per far salire i
-    // punti. Vale per tutti e tre i tier allo stesso modo, non
-    // solo per il Pulse+Superlike.
+    // punti. Vale per tutti i tier allo stesso modo.
     await blockBothDirectionsPermanently({ userAId: pulse.sender_id, userBId: receiverId }, { db });
 
     // I punti per aver ricevuto la Pulse sono già stati assegnati al
@@ -698,20 +705,21 @@ async function respondToPulse({ pulseId, receiverId, action }, { db, io }) {
     // a Like/Superlike, che danno sempre punti al ricevimento, mai
     // legati alla decisione presa dopo. Qui non si riassegnano.
     // standalone → chat_unlocked resta false (nessun contatto, solo il drink)
-    // super      → chat_unlocked true da subito (il profilo era già visibile)
+    // super/simple → chat_unlocked true da subito (il profilo era già visibile)
     // like       → chat_unlocked resta false per ora: si sblocca SOLO
     //              vincendo il minigioco in attemptGuess, che però non
     //              tocca mai lo status della Pulse (già "accepted" qui)
 
-    // Pulse+Superlike: l'accettazione apre la chat di default (il
-    // profilo era già visibile prima di decidere) — creiamo davvero
-    // la conversazione, poi avvisiamo in tempo reale entrambe le
-    // parti, sempre in privato, mai sulla stanza condivisa dell'Arena.
+    // Pulse+Superlike o Pulse semplice: l'accettazione apre la chat
+    // di default (il profilo era già visibile prima di decidere) —
+    // creiamo davvero la conversazione, poi avvisiamo in tempo reale
+    // entrambe le parti, sempre in privato, mai sulla stanza
+    // condivisa dell'Arena.
     let chatConversationId = null;
-    if (pulse.tier === 'super') {
+    if (opensChatOnAccept) {
       const chat = await openChatConversation({
         userAId: pulse.sender_id, userBId: receiverId,
-        arenaSessionId: pulse.arena_session_id, unlockedVia: 'pulse_super',
+        arenaSessionId: pulse.arena_session_id, unlockedVia: `pulse_${pulse.tier}`,
       }, { db, io });
       chatConversationId = chat.conversationId;
 
@@ -722,7 +730,7 @@ async function respondToPulse({ pulseId, receiverId, action }, { db, io }) {
     return {
       success: true,
       action: 'accept',
-      chatUnlocked: pulse.tier === 'super',
+      chatUnlocked: opensChatOnAccept,
       conversationId: chatConversationId,
       redeemCode,
       canStillPlayGuessGame: pulse.tier === 'like',   // il frontend sa se offrire il minigioco dopo
@@ -842,9 +850,9 @@ async function getReceivedPulses({ userId }, { db }) {
   const pulses = await db.queryAll(`
     SELECT r.id, r.drink_type, r.tier, r.status, r.chat_unlocked, r.created_at, r.redeem_code,
            v.id AS venue_id, v.name AS venue_name,
-           CASE WHEN r.tier = 'super' OR r.chat_unlocked THEN u.display_name ELSE NULL END AS sender_name,
-           CASE WHEN r.tier = 'super' OR r.chat_unlocked THEN u.id ELSE NULL END AS sender_id,
-           CASE WHEN r.tier = 'super' OR r.chat_unlocked THEN u.photo_url ELSE NULL END AS sender_photo_url
+           CASE WHEN r.tier IN ('super', 'simple') OR r.chat_unlocked THEN u.display_name ELSE NULL END AS sender_name,
+           CASE WHEN r.tier IN ('super', 'simple') OR r.chat_unlocked THEN u.id ELSE NULL END AS sender_id,
+           CASE WHEN r.tier IN ('super', 'simple') OR r.chat_unlocked THEN u.photo_url ELSE NULL END AS sender_photo_url
     FROM pulses r
     JOIN arena_sessions a ON a.id = r.arena_session_id
     JOIN venues v ON v.id = a.venue_id
@@ -1058,16 +1066,13 @@ async function refundAbandonedPulsesForSession(arenaSessionId, { db }) {
     `, [abandoned.map((p) => p.id)]);
   }
 
-  // Stessa regola estesa ai Superlike (22/8) — v. spiegazione
-  // completa in populive-checkin-logic.js, STEP 2.5.
+  // Un Superlike mai deciso, a fine serata — passa a "scaduto" per
+  // lo storico, ma dal 25/8 il credito non torna più indietro (v.
+  // spiegazione completa in populive-checkin-logic.js, STEP 2.5).
   const abandonedSuperlikes = await db.queryAll(`
-    SELECT id, sender_id FROM interactions
+    SELECT id FROM interactions
     WHERE arena_session_id = $1 AND type = 'superlike' AND status IN ('sent', 'ignored')
   `, [arenaSessionId]);
-
-  for (const i of abandonedSuperlikes) {
-    await db.query(`UPDATE users SET superlike_balance = superlike_balance + 1 WHERE id = $1`, [i.sender_id]);
-  }
 
   if (abandonedSuperlikes.length > 0) {
     await db.query(`
@@ -1135,9 +1140,9 @@ async function getPendingReceivedInteractions({ userId }, { db }) {
     (
       SELECT p.id::text AS id, ('pulse_' || p.tier) AS kind, p.created_at, v.name AS venue_name,
              p.drink_type,
-             CASE WHEN p.tier = 'super' THEN u.id ELSE NULL END,
-             CASE WHEN p.tier = 'super' THEN u.display_name ELSE NULL END,
-             CASE WHEN p.tier = 'super' THEN u.photo_url ELSE NULL END
+             CASE WHEN p.tier IN ('super', 'simple') THEN u.id ELSE NULL END,
+             CASE WHEN p.tier IN ('super', 'simple') THEN u.display_name ELSE NULL END,
+             CASE WHEN p.tier IN ('super', 'simple') THEN u.photo_url ELSE NULL END
       FROM pulses p
       JOIN arena_sessions a ON a.id = p.arena_session_id
       JOIN venues v ON v.id = a.venue_id
@@ -1374,15 +1379,16 @@ async function getInteractionHistory({ userId }, { db }) {
   `, [userId]);
 
   // Chi va svelato: i match (svelano già l'identità a entrambi per
-  // definizione) e i Superlike/Pulse+Superlike ricevuti (mostrano
-  // sempre l'identità, coerente col resto dell'app), o una Pulse
-  // anonima con chat_unlocked vero. Qui non esiste più il caso
-  // "inviato" — quello vive solo nella nuova schermata Like.
+  // definizione) e i Superlike/Pulse+Superlike/Pulse semplice
+  // ricevuti (mostrano sempre l'identità, coerente col resto
+  // dell'app), o una Pulse anonima con chat_unlocked vero. Qui non
+  // esiste più il caso "inviato" — quello vive solo nella nuova
+  // schermata Like.
   const revealed = rows.map((r) => {
     let reveal = false;
     if (r.direction === 'match') {
       reveal = true;
-    } else if (r.kind === 'superlike' || r.kind === 'pulse_super') {
+    } else if (r.kind === 'superlike' || r.kind === 'pulse_super' || r.kind === 'pulse_simple') {
       reveal = true;
     } else if (r.kind === 'pulse_standalone' || r.kind === 'pulse_like') {
       reveal = !!r.chat_unlocked;
