@@ -134,6 +134,17 @@ async function setChatKeepPreference({ conversationId, userId, wantsKeep }, { db
   // la scelta, chiudiamo SUBITO, senza aspettare nulla.
   const sessionAlreadyEnded = await isSessionEnded(conv.arena_session_id, { db });
   if (!wantsKeep && sessionAlreadyEnded && conv.closed_at === null) {
+    // Stesso declassamento del blocco "da match" già applicato in
+    // closeConversationsForSession, per lo stesso identico motivo —
+    // qui capita quando qualcuno ritira il consenso DOPO che la
+    // serata originale è già finita, un punto di chiusura diverso
+    // ma concettualmente lo stesso evento.
+    await db.query(`
+      UPDATE blocks SET arena_session_id = $3
+      WHERE reason = 'match' AND arena_session_id IS NULL
+        AND ((blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1))
+    `, [conv.user_a_id, conv.user_b_id, conv.arena_session_id]);
+
     await db.query(`UPDATE chat_conversations SET closed_at = now() WHERE id = $1`, [conversationId]);
     io.to(`user_${userId}`).emit('chat_closed', { conversationId, reason: 'preference_withdrawn' });
     io.to(`user_${otherUserId}`).emit('chat_closed', { conversationId, reason: 'preference_withdrawn' });
@@ -159,7 +170,47 @@ async function isSessionEnded(arenaSessionId, { db }) {
  * resta aperta anche oltre la fine della serata (i messaggi restano
  * comunque nel database per l'archivio di sicurezza in ogni caso).
  */
+/**
+ * ============================================================
+ * DECLASSAMENTO BLOCCO "DA MATCH" — chat non salvata (25/8)
+ * ============================================================
+ * Problema reale discusso con l'utente: il blocco anti-abuso da
+ * match (v. blockBothDirectionsPermanently in populive-interactions-
+ * logic.js) nasce SEMPRE permanente al momento del match, a
+ * prescindere da cosa succede poi alla chat — ma "non salvare la
+ * chat" è spesso una scelta PASSIVA (distrazione, batteria scarica,
+ * fine serata frettolosa), non un rifiuto vero. Trattarla come
+ * permanente quanto un vero rifiuto/blocco non ha senso.
+ *
+ * Soluzione: quando una chat sta per chiudersi perché NON salvata
+ * da entrambi, se il blocco tra quelle due persone è ANCORA "solo
+ * da match" (mai rinforzato da un rifiuto o da un blocco manuale
+ * vero — la gerarchia rejection > user_blocked > match resta
+ * intatta) lo si declassa da permanente a valido SOLO per quella
+ * sessione — proprio come un Pulse/Superlike lasciato "in
+ * sospeso". Il declassamento riusa lo stesso meccanismo di
+ * controllo già esistente ovunque nell'app (arena_session_id
+ * NULL = permanente, valorizzato = vale solo per QUELLA sessione)
+ * — non serve nessuna logica nuova di lettura, solo questo unico
+ * punto di scrittura in più.
+ * ============================================================
+ */
 async function closeConversationsForSession(arenaSessionId, { db }) {
+  const toClose = await db.queryAll(`
+    SELECT user_a_id, user_b_id FROM chat_conversations
+    WHERE arena_session_id = $1
+      AND closed_at IS NULL
+      AND NOT (user_a_wants_keep AND user_b_wants_keep)
+  `, [arenaSessionId]);
+
+  for (const pair of toClose) {
+    await db.query(`
+      UPDATE blocks SET arena_session_id = $3
+      WHERE reason = 'match' AND arena_session_id IS NULL
+        AND ((blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1))
+    `, [pair.user_a_id, pair.user_b_id, arenaSessionId]);
+  }
+
   await db.query(`
     UPDATE chat_conversations SET closed_at = now()
     WHERE arena_session_id = $1
