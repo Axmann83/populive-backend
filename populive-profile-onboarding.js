@@ -186,7 +186,7 @@ async function requireCompletedOnboarding(userId, { db }) {
  * altri utenti.
  * ============================================================
  */
-async function getPublicProfile({ userId, arenaSessionId }, { db }) {
+async function getPublicProfile({ userId, arenaSessionId, viewerId }, { db }) {
   const profile = await db.query(`
     SELECT display_name, photo_url, avatar_emoji, bio, instant_influencer_category,
            is_premium, premium_expires_at, is_verified
@@ -257,6 +257,30 @@ async function getPublicProfile({ userId, arenaSessionId }, { db }) {
 
   const founderRow = await db.query(`SELECT 1 FROM founder_bracelets WHERE user_id = $1`, [userId]);
 
+  // "Ci siamo già incontrati" (25/8, idea nata parlando insieme di
+  // cosa succede quando una chat non viene salvata) — solo per la
+  // "vera seconda occasione": una chat GIÀ CHIUSA tra queste due
+  // persone, mai mentre si sta ancora chattando attivamente (in
+  // quel caso sarebbe ridondante, la conversazione è già lì). Se
+  // esistono più match passati nel tempo, mostriamo solo il più
+  // recente — un piccolo promemoria, non uno storico completo.
+  let pastMatch = null;
+  if (viewerId && viewerId !== userId) {
+    const pastMatchRow = await db.query(`
+      SELECT cc.created_at, v.name AS venue_name
+      FROM chat_conversations cc
+      JOIN arena_sessions a ON a.id = cc.arena_session_id
+      JOIN venues v ON v.id = a.venue_id
+      WHERE ((cc.user_a_id = $1 AND cc.user_b_id = $2) OR (cc.user_a_id = $2 AND cc.user_b_id = $1))
+        AND cc.closed_at IS NOT NULL
+      ORDER BY cc.created_at DESC
+      LIMIT 1
+    `, [userId, viewerId]);
+    if (pastMatchRow) {
+      pastMatch = { venueName: pastMatchRow.venue_name, matchedAt: pastMatchRow.created_at };
+    }
+  }
+
   return {
     success: true,
     profile: {
@@ -275,6 +299,7 @@ async function getPublicProfile({ userId, arenaSessionId }, { db }) {
       isFounder: !!founderRow,
       instantInfluencerCategory: finalInstantInfluencerCategory,
       sponsoredProducts: finalSponsoredProducts,
+      pastMatch,
     },
   };
 }
