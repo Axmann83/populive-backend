@@ -107,13 +107,14 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
     `, [abandonedPulses.map((p) => p.id)]);
   }
 
-  // Stessa identica regola, estesa ai Superlike (22/8) — scoperto
-  // che il rimborso di quella sera era stato costruito SOLO per la
-  // Pulse, mai per il Superlike, nonostante lo stesso identico
-  // principio ("un rifiuto/mai deciso non deve far perdere il
-  // credito per sempre") valga per entrambi allo stesso modo.
+  // Un Superlike mai deciso e abbandonato (cambio locale) passa a
+  // "scaduto" — utile per lo storico di chi l'ha inviato (Like→
+  // Inviati), anche se dal 25/8 il credito non torna più indietro
+  // in nessun caso (stesso principio di Tinder/Hinge, ripensato
+  // rispetto alla correzione del 22/8 — la Pulse invece resta
+  // rimborsabile, coinvolge un vero pagamento).
   const abandonedSuperlikes = await db.queryAll(`
-    SELECT i.id, i.sender_id
+    SELECT i.id
     FROM interactions i
     JOIN arena_sessions a ON a.id = i.arena_session_id
     WHERE i.receiver_id = $1
@@ -121,10 +122,6 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
       AND i.status IN ('sent', 'ignored')
       AND a.venue_id != $2
   `, [userId, venueId]);
-
-  for (const i of abandonedSuperlikes) {
-    await db.query(`UPDATE users SET superlike_balance = superlike_balance + 1 WHERE id = $1`, [i.sender_id]);
-  }
 
   if (abandonedSuperlikes.length > 0) {
     await db.query(`
