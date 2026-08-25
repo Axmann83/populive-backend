@@ -170,10 +170,18 @@ async function initiatePulsePurchase({ senderId, receiverId, arenaSessionId, dri
   const purchaserTestRow = await db.query(`SELECT is_test_account FROM users WHERE id = $1`, [senderId]);
   if (blocked && !purchaserTestRow?.is_test_account) return { success: false, reason: 'blocked_by_receiver' };
 
-  if (tier === 'super') {
+  // Sia "super" che "simple" svelano subito l'identità (25/8,
+  // decisione esplicita: un'offerta vera richiede che si sappia da
+  // chi arriva) — entrambi devono quindi rispettare le stesse
+  // preferenze di contatto del destinatario. Il saldo Superlike
+  // invece resta un vincolo SOLO per "super", mai per "simple" (che
+  // esiste apposta per essere slegato da quel credito).
+  if (tier === 'super' || tier === 'simple') {
     const check = await canSendDirectContact({ senderId, receiverId }, { db });
     if (!check.allowed) return { success: false, reason: check.reason };
+  }
 
+  if (tier === 'super') {
     // Un Pulse+Superlike richiede ANCHE un Superlike vero da spendere
     // — controllo qui SUBITO (senza ancora scalarlo: lo faremo solo
     // quando la Pulse nascerà per davvero, dentro createPulseRecord,
