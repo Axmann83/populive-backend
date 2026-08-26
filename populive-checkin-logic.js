@@ -15,7 +15,7 @@
  * ============================================================
  */
 
-const { refundPulseCredit } = require('./populive-interactions-logic');
+const { refundPulseCredit, createIgnoredCooldownBlock } = require('./populive-interactions-logic');
 
 async function handleCheckin({ userId, venueId }, { db, redis, io }) {
 
@@ -98,6 +98,7 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
 
   for (const p of abandonedPulses) {
     await refundPulseCredit({ userId: p.sender_id }, { db });
+    await createIgnoredCooldownBlock({ ignoredUserId: p.sender_id, ignorerUserId: userId }, { db });
   }
 
   if (abandonedPulses.length > 0) {
@@ -114,7 +115,7 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
   // rispetto alla correzione del 22/8 — la Pulse invece resta
   // rimborsabile, coinvolge un vero pagamento).
   const abandonedSuperlikes = await db.queryAll(`
-    SELECT i.id
+    SELECT i.id, i.sender_id
     FROM interactions i
     JOIN arena_sessions a ON a.id = i.arena_session_id
     WHERE i.receiver_id = $1
@@ -123,11 +124,40 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
       AND a.venue_id != $2
   `, [userId, venueId]);
 
+  for (const i of abandonedSuperlikes) {
+    await createIgnoredCooldownBlock({ ignoredUserId: i.sender_id, ignorerUserId: userId }, { db });
+  }
+
   if (abandonedSuperlikes.length > 0) {
     await db.query(`
       UPDATE interactions SET status = 'expired'
       WHERE id = ANY($1)
     `, [abandonedSuperlikes.map((i) => i.id)]);
+  }
+
+  // Stessa regola estesa al Like semplice (26/8, richiesta esplicita
+  // dell'utente) — il Like non ha un vero "status" da far scadere
+  // (resta anonimo, nessun rifiuto/ignora possibile, mai un costo da
+  // rimborsare) ma può restare comunque senza risposta per settimane.
+  // Cerchiamo i Like ricevuti mai sfociati in un match, abbandonati
+  // allo stesso identico modo (cambio locale) — solo il raffreddamento
+  // si applica qui, nessuno stato da aggiornare, nessun credito.
+  const abandonedLikes = await db.queryAll(`
+    SELECT i.id, i.sender_id
+    FROM interactions i
+    JOIN arena_sessions a ON a.id = i.arena_session_id
+    WHERE i.receiver_id = $1
+      AND i.type = 'like'
+      AND i.status = 'sent'
+      AND a.venue_id != $2
+      AND NOT EXISTS (
+        SELECT 1 FROM interactions r
+        WHERE r.sender_id = $1 AND r.receiver_id = i.sender_id AND r.type = 'like'
+      )
+  `, [userId, venueId]);
+
+  for (const i of abandonedLikes) {
+    await createIgnoredCooldownBlock({ ignoredUserId: i.sender_id, ignorerUserId: userId }, { db });
   }
 
   // ------------------------------------------------------------
