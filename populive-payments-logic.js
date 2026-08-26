@@ -160,7 +160,7 @@ async function initiatePulsePurchase({ senderId, receiverId, arenaSessionId, dri
   }
 
   const blocked = await db.query(`
-    SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2 AND (arena_session_id IS NULL OR arena_session_id = $3)
+    SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2 AND (arena_session_id IS NULL OR arena_session_id = $3 OR (reason = 'ignored_cooldown' AND expires_at > now()))
   `, [receiverId, senderId, arenaSessionId]);
   // Un account di prova non deve mai restare bloccato da un
   // rifiuto/ignora precedente — altrimenti due account di prova
