@@ -51,7 +51,7 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type, via
 
   if (!isTestSender) {
     const blocked = await db.query(`
-      SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2 AND (arena_session_id IS NULL OR arena_session_id = $3)
+      SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2 AND (arena_session_id IS NULL OR arena_session_id = $3 OR (reason = 'ignored_cooldown' AND expires_at > now()))
     `, [receiverId, senderId, arenaSessionId]);
     if (blocked) return { success: false, reason: 'blocked_by_receiver' };
 
@@ -447,7 +447,7 @@ async function trackProfileView({ viewerId, viewedUserId, arenaSessionId, viaHis
   if (viewerId === viewedUserId) return { success: true, skipped: true }; // non contano le proprie
 
   const blocked = await db.query(`
-    SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2 AND (arena_session_id IS NULL OR arena_session_id = $3)
+    SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2 AND (arena_session_id IS NULL OR arena_session_id = $3 OR (reason = 'ignored_cooldown' AND expires_at > now()))
   `, [viewedUserId, viewerId, arenaSessionId]);
   if (blocked) return { success: false, reason: 'blocked_by_viewed_user' };
 
@@ -1051,12 +1051,13 @@ async function refundPulseCredit({ userId }, { db }) {
  */
 async function refundAbandonedPulsesForSession(arenaSessionId, { db }) {
   const abandoned = await db.queryAll(`
-    SELECT id, sender_id FROM pulses
+    SELECT id, sender_id, receiver_id FROM pulses
     WHERE arena_session_id = $1 AND status IN ('pending', 'ignored')
   `, [arenaSessionId]);
 
   for (const p of abandoned) {
     await refundPulseCredit({ userId: p.sender_id }, { db });
+    await createIgnoredCooldownBlock({ ignoredUserId: p.sender_id, ignorerUserId: p.receiver_id }, { db });
   }
 
   if (abandoned.length > 0) {
@@ -1070,15 +1071,37 @@ async function refundAbandonedPulsesForSession(arenaSessionId, { db }) {
   // lo storico, ma dal 25/8 il credito non torna più indietro (v.
   // spiegazione completa in populive-checkin-logic.js, STEP 2.5).
   const abandonedSuperlikes = await db.queryAll(`
-    SELECT id FROM interactions
+    SELECT id, sender_id, receiver_id FROM interactions
     WHERE arena_session_id = $1 AND type = 'superlike' AND status IN ('sent', 'ignored')
   `, [arenaSessionId]);
+
+  for (const i of abandonedSuperlikes) {
+    await createIgnoredCooldownBlock({ ignoredUserId: i.sender_id, ignorerUserId: i.receiver_id }, { db });
+  }
 
   if (abandonedSuperlikes.length > 0) {
     await db.query(`
       UPDATE interactions SET status = 'expired'
       WHERE id = ANY($1)
     `, [abandonedSuperlikes.map((i) => i.id)]);
+  }
+
+  // Stesso raffreddamento esteso al Like semplice a fine serata
+  // (26/8) — stessa identica logica dello STEP 2.5 in
+  // populive-checkin-logic.js, qui applicata quando è la SERATA a
+  // finire, non il destinatario a cambiare locale.
+  const abandonedLikes = await db.queryAll(`
+    SELECT i.id, i.sender_id, i.receiver_id
+    FROM interactions i
+    WHERE i.arena_session_id = $1 AND i.type = 'like' AND i.status = 'sent'
+      AND NOT EXISTS (
+        SELECT 1 FROM interactions r
+        WHERE r.sender_id = i.receiver_id AND r.receiver_id = i.sender_id AND r.type = 'like'
+      )
+  `, [arenaSessionId]);
+
+  for (const i of abandonedLikes) {
+    await createIgnoredCooldownBlock({ ignoredUserId: i.sender_id, ignorerUserId: i.receiver_id }, { db });
   }
 }
 
@@ -1235,6 +1258,50 @@ async function getUnseenLikeCenterCount({ userId }, { db }) {
 async function markLikeCenterSeen({ userId }, { db }) {
   await db.query(`UPDATE users SET like_center_last_seen_at = now() WHERE id = $1`, [userId]);
   return { success: true };
+}
+
+/**
+ * ============================================================
+ * RAFFREDDAMENTO ANTI-STALKING dopo un'interazione mai decisa
+ * (26/8, discusso e confermato con l'utente)
+ * ============================================================
+ * Quando un Like/Superlike/Pulse resta senza risposta e "svanisce"
+ * (cambio locale o fine serata — mai dopo un rifiuto esplicito, che
+ * resta permanente come già oggi), chi l'ha ricevuta non potrà
+ * mandare nulla di nuovo a chi l'ha ignorata per due settimane —
+ * A SENSO UNICO, come il blocco da rifiuto (solo chi ha ignorato è
+ * protetto, non il contrario). Basato sul TEMPO, non sulla sessione
+ * arena — vale ovunque ci si incontri di nuovo nel frattempo, stesso
+ * locale o uno diverso, non fa differenza. Nessuna escalation se
+ * capita più volte (decisione esplicita dell'utente: chi si sente
+ * davvero infastidito ha sempre il rifiuto vero, permanente, a
+ * disposizione). Riusa la stessa tabella blocks, con un motivo
+ * dedicato e una scadenza vera (expires_at) invece del solito
+ * arena_session_id.
+ * ============================================================
+ */
+async function createIgnoredCooldownBlock({ ignoredUserId, ignorerUserId }, { db }) {
+  await db.query(`
+    INSERT INTO blocks (blocker_id, blocked_id, reason, expires_at, arena_session_id)
+    VALUES ($1, $2, 'ignored_cooldown', now() + interval '14 days', NULL)
+    ON CONFLICT (blocker_id, blocked_id) DO UPDATE SET
+      reason = CASE
+        WHEN blocks.reason IN ('rejection', 'user_blocked') THEN blocks.reason
+        ELSE 'ignored_cooldown'
+      END,
+      expires_at = CASE
+        WHEN blocks.reason IN ('rejection', 'user_blocked') THEN blocks.expires_at
+        ELSE now() + interval '14 days'
+      END,
+      arena_session_id = CASE
+        WHEN blocks.reason IN ('rejection', 'user_blocked') THEN blocks.arena_session_id
+        ELSE NULL
+      END,
+      created_at = CASE
+        WHEN blocks.reason IN ('rejection', 'user_blocked') THEN blocks.created_at
+        ELSE now()
+      END
+  `, [ignorerUserId, ignoredUserId]);
 }
 
 async function getPermanentlyBlockedPairUserIds({ userId }, { db }) {
@@ -1500,4 +1567,4 @@ async function clearAllNotifications({ userId }, { db }) {
   return { success: true };
 }
 
-module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createPulseRecord, respondToPulse, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedPulses, getSentPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews, refundPulseCredit, refundAbandonedPulsesForSession, getPermanentlyBlockedPairUserIds, blockUserFromChat, getPendingReceivedInteractions, getSentInteractionsHistory, getUnseenLikeCenterCount, markLikeCenterSeen };
+module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createPulseRecord, respondToPulse, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedPulses, getSentPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews, refundPulseCredit, refundAbandonedPulsesForSession, getPermanentlyBlockedPairUserIds, blockUserFromChat, getPendingReceivedInteractions, getSentInteractionsHistory, getUnseenLikeCenterCount, markLikeCenterSeen, createIgnoredCooldownBlock };
