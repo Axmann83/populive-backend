@@ -131,8 +131,13 @@ async function setChatKeepPreference({ conversationId, userId, wantsKeep }, { db
   // Enforcement in tempo reale: se questa chat era già stata
   // "conservata" (sessione originale finita, closed_at ancora null
   // grazie al doppio consenso) e adesso una delle due parti ripensa
-  // la scelta, chiudiamo SUBITO, senza aspettare nulla.
-  const sessionAlreadyEnded = await isSessionEnded(conv.arena_session_id, { db });
+  // la scelta, chiudiamo SUBITO, senza aspettare nulla. Vale solo se
+  // l'interruttore "richiedi Conserva esplicito" è acceso — a
+  // interruttore spento questo bottone non è nemmeno mostrato in
+  // ChatWindow.jsx, ma controlliamo anche qui per sicurezza (26/8).
+  const keepRequiredFlag = await db.query(`SELECT is_enabled FROM feature_flags WHERE feature_key = 'chat_keep_required'`);
+  const keepRequired = keepRequiredFlag ? keepRequiredFlag.is_enabled : true;
+  const sessionAlreadyEnded = keepRequired && await isSessionEnded(conv.arena_session_id, { db });
   if (!wantsKeep && sessionAlreadyEnded && conv.closed_at === null) {
     // Stesso declassamento del blocco "da match" già applicato in
     // closeConversationsForSession, per lo stesso identico motivo —
@@ -196,6 +201,20 @@ async function isSessionEnded(arenaSessionId, { db }) {
  * ============================================================
  */
 async function closeConversationsForSession(arenaSessionId, { db }) {
+  // Semplificazione per le prime serate test (26/8, richiesta
+  // esplicita): se l'interruttore "richiedi Conserva esplicito" è
+  // spento in dashboard, le chat NON si chiudono mai da sole a fine
+  // serata — si comportano come su Tinder/Hinge, si conservano di
+  // default. L'unico modo per finirla resta il "Blocca" vero (mai
+  // toccato da questo interruttore). Tutto il resto costruito il
+  // 25/8 (declassamento del blocco da match, promemoria "Ci siamo
+  // già incontrati") resta pronto e corretto per quando l'interruttore
+  // verrà riacceso — semplicemente non si attiva mai finché non c'è
+  // nessuna chat da chiudere.
+  const keepRequiredFlag = await db.query(`SELECT is_enabled FROM feature_flags WHERE feature_key = 'chat_keep_required'`);
+  const keepRequired = keepRequiredFlag ? keepRequiredFlag.is_enabled : true;
+  if (!keepRequired) return;
+
   const toClose = await db.queryAll(`
     SELECT user_a_id, user_b_id FROM chat_conversations
     WHERE arena_session_id = $1
