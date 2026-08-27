@@ -38,6 +38,44 @@ async function openChatConversation({ userAId, userBId, arenaSessionId, unlocked
   return { conversationId: conv.id, alreadyExisted: false };
 }
 
+/**
+ * ============================================================
+ * MESSAGGIO DIRETTO DEGLI ARCHITETTI, SENZA MATCH (26/8)
+ * ============================================================
+ * Nato per contattare direttamente chi si nota emergere in
+ * classifica (es. per proporgli di diventare Instant Influencer) —
+ * SOLO per i 5 Architetti veri, mai per un utente normale. La
+ * sicurezza vera sta nel middleware requireArchitect sull'endpoint
+ * che chiama questa funzione, non qui dentro.
+ *
+ * Funzione SEPARATA da openChatConversation (non riusata così
+ * com'è) per un motivo preciso: quella confronta arena_session_id
+ * con "= $1", che in SQL non trova MAI una riga con NULL (NULL non
+ * è mai uguale a NULL) — usandola qui con arena_session_id nullo
+ * (queste chat non sono legate a nessuna serata specifica) avrebbe
+ * creato una nuova conversazione duplicata ogni volta invece di
+ * ritrovare quella già aperta.
+ * ============================================================
+ */
+async function openAdminChat({ architettoId, targetUserId }, { db, io }) {
+  const [a, b] = [architettoId, targetUserId].sort();
+
+  const existing = await db.query(`
+    SELECT id FROM chat_conversations
+    WHERE arena_session_id IS NULL AND user_a_id = $1 AND user_b_id = $2 AND unlocked_via = 'admin_direct'
+  `, [a, b]);
+
+  if (existing) return { conversationId: existing.id, alreadyExisted: true };
+
+  const conv = await db.query(`
+    INSERT INTO chat_conversations (arena_session_id, user_a_id, user_b_id, unlocked_via)
+    VALUES (NULL, $1, $2, 'admin_direct')
+    RETURNING id
+  `, [a, b]);
+
+  return { conversationId: conv.id, alreadyExisted: false };
+}
+
 async function sendMessage({ conversationId, senderId, body }, { db, io }) {
   const conv = await db.query(`SELECT * FROM chat_conversations WHERE id = $1`, [conversationId]);
   if (!conv) return { success: false, reason: 'conversation_not_found' };
@@ -323,4 +361,4 @@ async function getUnreadChatCount({ userId }, { db }) {
   return parseInt(row?.total) || 0;
 }
 
-module.exports = { openChatConversation, sendMessage, getMessages, closeConversationsForSession, setChatKeepPreference, purgeExpiredChatMessages, getMyActiveConversations, markConversationRead, getUnreadChatCount };
+module.exports = { openChatConversation, openAdminChat, sendMessage, getMessages, closeConversationsForSession, setChatKeepPreference, purgeExpiredChatMessages, getMyActiveConversations, markConversationRead, getUnreadChatCount };
