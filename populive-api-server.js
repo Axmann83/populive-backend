@@ -23,7 +23,7 @@ const {
   sendInteraction, trackProfileView, respondToPulse, attemptGuess, respondToSuperlike, getReceivedPulses, getSentPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews, getPermanentlyBlockedPairUserIds, blockUserFromChat, getPendingReceivedInteractions, getSentInteractionsHistory, getUnseenLikeCenterCount, markLikeCenterSeen,
 } = require('./populive-interactions-logic');
 const { initiatePulsePurchase, initiatePurchase, initiateVenuePulseCreditsPurchase, handleStripeWebhook } = require('./populive-payments-logic');
-const { sendMessage, getMessages, setChatKeepPreference, getMyActiveConversations, markConversationRead, getUnreadChatCount } = require('./populive-chat-logic');
+const { sendMessage, getMessages, setChatKeepPreference, getMyActiveConversations, markConversationRead, getUnreadChatCount, openAdminChat } = require('./populive-chat-logic');
 const { startScheduler } = require('./populive-scheduler');
 const {
   createProfile, setProfilePhoto, updateProfileDetails, completeOnboarding, requireCompletedOnboarding, getPublicProfile,
@@ -377,6 +377,15 @@ app.post('/api/dashboard/users/:userId/instant-influencer', requireArchitect, ah
   const { category, products } = req.body;
   const result = await setInstantInfluencerStatus({ userId: req.params.userId, category, products }, { db });
   res.json(result);
+}));
+
+// Messaggio diretto degli Architetti dalla classifica, senza match
+// (26/8) — endpoint SOLO dashboard, mai richiamato dall'app normale;
+// la vera sicurezza sta nel middleware requireArchitect, non nel
+// fatto che il frontend lo chiami solo da un certo punto.
+app.post('/api/dashboard/users/:userId/start-chat', requireArchitect, ah(async (req, res) => {
+  const result = await openAdminChat({ architettoId: req.userId, targetUserId: req.params.userId }, { db, io });
+  res.json({ success: true, ...result });
 }));
 
 app.post('/api/dashboard/venues/:venueId/spending-config', requireArchitect, ah(async (req, res) => {
