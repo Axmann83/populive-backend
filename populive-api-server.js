@@ -854,7 +854,7 @@ app.get('/api/profile/:userId/settings', requireOnboarded, ah(async (req, res) =
   const user = await db.query(`
     SELECT show_ranking_on_profile, sponsored_missions_enabled,
            appears_in_historical_search, receive_pulses_enabled, contact_filter,
-           ghost_mode_enabled, haptic_notifications_enabled
+           ghost_mode_enabled, haptic_notifications_enabled, photo_url
     FROM users WHERE id = $1
   `, [req.userId]);
   if (!user) return res.json({ success: false, reason: 'user_not_found' });
@@ -869,6 +869,7 @@ app.get('/api/profile/:userId/settings', requireOnboarded, ah(async (req, res) =
       contactFilter: user.contact_filter,
       ghostModeEnabled: user.ghost_mode_enabled,
       hapticNotificationsEnabled: user.haptic_notifications_enabled,
+      photoUrl: user.photo_url,
     },
   });
 }));
