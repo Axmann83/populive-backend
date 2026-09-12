@@ -177,4 +177,66 @@ function normalizePhoneNumber(raw) {
   return `+39${cleaned}`;
 }
 
-module.exports = { requestOtp, verifyOtp, verifyToken };
+/**
+ * ============================================================
+ * CANCELLAZIONE ACCOUNT (12/9) — richiesta obbligatoria di Apple/Google
+ * ============================================================
+ * Approccio: cancellazione "soft" con anonimizzazione, non una
+ * pulizia riga per riga di ogni tabella collegata — per due motivi
+ * precisi, non solo pigrizia:
+ *   1) Il ledger punti (points_ledger) è append-only per scelta di
+ *      design (integrità di classifiche/storico) — la tensione con
+ *      il diritto di cancellazione GDPR è già segnalata come punto
+ *      APERTO con lo studio legale, non risolta qui in autonomia.
+ *      Anonimizzare il PROFILO soddisfa la richiesta pratica della
+ *      persona (nome/foto/bio/numero spariscono, non è più
+ *      rintracciabile né ricontattabile) senza decidere da soli una
+ *      questione ancora aperta con i legali.
+ *   2) I messaggi già scambiati in una chat appartengono anche
+ *      all'ALTRA persona nella conversazione — si sostituisce il
+ *      testo con un segnaposto, non si fa sparire la conversazione
+ *      da sotto i piedi di chi resta.
+ *
+ * Cosa succede davvero:
+ *   - deleted_at = ora, profilo azzerato (nome/foto/bio/hashtag)
+ *   - numero di telefono liberato (sostituito con un segnaposto
+ *     univoco) — libera il numero vero per un'eventuale nuova
+ *     registrazione futura, e IMPEDISCE da solo ogni nuovo accesso
+ *     sul vecchio account (la ricerca per numero in verifyOtp non
+ *     lo troverà più, v. sopra)
+ *   - messaggi già inviati: testo sostituito, struttura della
+ *     conversazione intatta per l'altra persona
+ *   - escluso da classifiche/ricerche — v. deleted_at IS NULL già
+ *     aggiunto in populive-ranking-queries.js
+ *   - il Radar (presenza live via socket, non una query) si
+ *     risolve da sé appena il chiamante disconnette la sessione
+ *     subito dopo — nessun filtro aggiuntivo necessario lì.
+ * ============================================================
+ */
+async function deleteAccount({ userId }, { db }) {
+  await db.query(`
+    UPDATE users SET
+      deleted_at = now(),
+      display_name = 'Utente eliminato',
+      photo_url = NULL,
+      avatar_emoji = NULL,
+      bio = NULL,
+      phone_number = 'del_' || substring(id::text, 1, 16),
+      ghost_mode_enabled = false,
+      receive_pulses_enabled = false,
+      sponsored_missions_enabled = false,
+      appears_in_historical_search = false
+    WHERE id = $1
+  `, [userId]);
+
+  await db.query(`DELETE FROM user_hashtags WHERE user_id = $1`, [userId]);
+
+  await db.query(`
+    UPDATE chat_messages SET body = '[messaggio eliminato]'
+    WHERE sender_id = $1
+  `, [userId]);
+
+  return { success: true };
+}
+
+module.exports = { requestOtp, verifyOtp, verifyToken, deleteAccount };
