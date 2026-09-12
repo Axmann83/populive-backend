@@ -33,7 +33,7 @@ const { generateVenueReport, getPopularVenuesNow, getVenueHistoricalCheckins, ge
 const { joinSquad, awardTableSpendingBonusByVenue, updateVenueSpendingConfig } = require('./populive-connector-engine');
 const { getLocalRanking, getGlobalRanking, getUserRankingSummary, getWelcomeBackSummary, searchUsersByHashtag, checkLocalRankingThreshold } = require('./populive-ranking-queries');
 const { createMission, getAllMissions, getMissionsNearUser, completeMission, getMissionPreview } = require('./populive-missions-logic');
-const { requestOtp, verifyOtp, verifyToken } = require('./populive-auth-logic');
+const { requestOtp, verifyOtp, verifyToken, deleteAccount } = require('./populive-auth-logic');
 
 const app = express();
 app.use(cors()); // permette al frontend (su un altro indirizzo) di chiamare questo backend
@@ -197,6 +197,15 @@ app.post('/api/profile', requireAuthOnly, ah(async (req, res) => {
 
 app.post('/api/profile/:userId/photo', requireAuthOnly, ah(async (req, res) => {
   const result = await setProfilePhoto({ userId: req.userId, photoUrl: req.body.photoUrl }, { db });
+  res.json(result);
+}));
+
+// Cancellazione account (12/9) — richiesta obbligatoria di Apple/
+// Google. Come ogni azione "sul proprio account", SEMPRE req.userId
+// dal token, mai il pezzo di indirizzo che chiunque potrebbe
+// cambiare a mano per cancellare l'account di un altro.
+app.delete('/api/profile/me', requireAuthOnly, ah(async (req, res) => {
+  const result = await deleteAccount({ userId: req.userId }, { db });
   res.json(result);
 }));
 
