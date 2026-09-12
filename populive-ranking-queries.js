@@ -60,7 +60,7 @@ async function getLocalRanking({ arenaSessionId, hashtag, gender }, { db }) {
       ON ss.user_id = u.id AND ss.arena_session_id = $1
     JOIN checkins c
       ON c.user_id = u.id AND c.arena_session_id = $1
-    WHERE true ${extraWhere}
+    WHERE true ${extraWhere} AND u.deleted_at IS NULL
     GROUP BY u.id, u.display_name, u.avatar_emoji, u.photo_url, cs.is_top_connector, ss.is_top_spender
     ORDER BY local_points DESC
   `, params);
@@ -87,7 +87,7 @@ async function getGlobalRanking({ limit = 100, hashtag, gender }, { db }) {
   // più in alto tra chi ha #nightlife" o "solo donne". Nessuno dei
   // due è obbligatorio: passati entrambi vuoti, la query si
   // comporta esattamente come prima.
-  const conditions = ['u.onboarding_completed = true']; // SEMPRE — mai mostrare righe "fantasma" (es. account pre-creati per Architetti/Founder/test, mai passati dalla registrazione vera)
+  const conditions = ['u.onboarding_completed = true', 'u.deleted_at IS NULL']; // SEMPRE — mai mostrare righe "fantasma" (es. account pre-creati per Architetti/Founder/test, mai passati dalla registrazione vera) né account cancellati (12/9)
   const params = [];
   let paramIndex = 1;
 
@@ -314,7 +314,7 @@ async function searchUsersByHashtag({ hashtag, limit = 50 }, { db }) {
     JOIN hashtags h ON h.id = uh.hashtag_id AND LOWER(h.name) = LOWER($1)
     LEFT JOIN points_ledger pl ON pl.user_id = u.id
     LEFT JOIN connector_status cs ON cs.user_id = u.id
-    WHERE u.onboarding_completed = true
+    WHERE u.onboarding_completed = true AND u.deleted_at IS NULL
     GROUP BY u.id, u.display_name, u.phone_number, u.photo_url, u.avatar_emoji, u.is_verified
     ORDER BY global_points DESC
     LIMIT $2
