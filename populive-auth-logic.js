@@ -45,16 +45,39 @@ async function requestOtp({ phoneNumber }, { db }) {
   const normalizedPhone = normalizePhoneNumber(phoneNumber);
   if (!normalizedPhone) return { success: false, reason: 'invalid_phone_number' };
 
+  // Numero di test per i revisori Apple/Google (12/9) — un numero
+  // vero e proprio, semplicemente mai controllato per davvero,
+  // perché il codice è SEMPRE lo stesso. Richiede "Enable Custom
+  // Verification Code" attivato a mano sul servizio Verify (scheda
+  // General, pannello Twilio) — senza quello, Twilio rifiuterebbe
+  // il parametro custom_code sotto. Configurato via variabili
+  // d'ambiente, mai scritto fisso nel codice: numero e codice sono
+  // informazioni da consegnare ai soli revisori, non da lasciare
+  // visibili a chiunque legga il repository.
+  const isReviewerTestNumber = normalizedPhone === process.env.APP_REVIEW_TEST_PHONE_NUMBER;
+  const verificationParams = { to: normalizedPhone, channel: 'sms' };
+  if (isReviewerTestNumber && process.env.APP_REVIEW_TEST_OTP_CODE) {
+    verificationParams.customCode = process.env.APP_REVIEW_TEST_OTP_CODE;
+  }
+
   try {
     const client = getTwilioClient();
     await client.verify.v2
       .services(process.env.TWILIO_VERIFY_SERVICE_SID)
-      .verifications.create({ to: normalizedPhone, channel: 'sms' });
+      .verifications.create(verificationParams);
   } catch (err) {
+    console.error('[auth] invio SMS fallito:', err);
+    // Per il numero di test dei revisori, NON blocchiamo qui — il
+    // codice è comunque fisso e noto in anticipo (12/9, la persona
+    // reale dietro questo numero non può più controllare l'SMS).
+    // Se la verifica non è stata davvero creata lato Twilio, il
+    // passo successivo (verifyOtp) lo scoprirà da solo con un
+    // errore più chiaro ("codice sbagliato") invece di bloccare
+    // tutto già a questo primo passo.
+    if (isReviewerTestNumber) return { success: true };
     // Se l'SMS non parte per davvero (es. numero non verificato in
     // un account ancora in prova), non ha senso dire all'utente
     // "controlla il telefono" — meglio un errore chiaro subito.
-    console.error('[auth] invio SMS fallito:', err);
     return { success: false, reason: 'sms_send_failed' };
   }
 
