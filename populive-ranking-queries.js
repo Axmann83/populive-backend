@@ -70,6 +70,11 @@ async function getLocalRanking({ arenaSessionId, hashtag, gender }, { db }) {
   const bigSpenderFlag = await db.query(`SELECT is_enabled FROM feature_flags WHERE feature_key = 'big_spender'`);
   const bigSpenderEnabled = bigSpenderFlag ? bigSpenderFlag.is_enabled : true;
 
+  // Stesso principio, per il Top Connector — coerenza voluta
+  // esplicitamente in dashboard con tutte le altre funzionalità.
+  const topConnectorFlag = await db.query(`SELECT is_enabled FROM feature_flags WHERE feature_key = 'top_connector'`);
+  const topConnectorEnabled = topConnectorFlag ? topConnectorFlag.is_enabled : true;
+
   return rows.map((r, i) => ({
     rank: i + 1,
     userId: r.user_id,
@@ -77,7 +82,7 @@ async function getLocalRanking({ arenaSessionId, hashtag, gender }, { db }) {
     avatarEmoji: r.avatar_emoji,
     photoUrl: r.photo_url,
     points: parseInt(r.local_points),
-    isTopConnector: !!r.is_top_connector,
+    isTopConnector: topConnectorEnabled && !!r.is_top_connector,
     isTopSpender: bigSpenderEnabled && !!r.is_top_spender,
   }));
 }
@@ -320,6 +325,13 @@ async function searchUsersByHashtag({ hashtag, limit = 50 }, { db }) {
     LIMIT $2
   `, [hashtag.replace(/^#/, '').trim(), limit]);
 
+  // Stesso interruttore di getLocalRanking — così se il Top Connector
+  // è spento, non compare come "vero" nemmeno qui, dove viene
+  // mostrato agli Architetti insieme al numero di telefono (es. per
+  // la ricerca #pr).
+  const topConnectorFlag = await db.query(`SELECT is_enabled FROM feature_flags WHERE feature_key = 'top_connector'`);
+  const topConnectorEnabled = topConnectorFlag ? topConnectorFlag.is_enabled : true;
+
   return rows.map((r) => ({
     userId: r.user_id,
     displayName: r.display_name,
@@ -327,7 +339,7 @@ async function searchUsersByHashtag({ hashtag, limit = 50 }, { db }) {
     photoUrl: r.photo_url,
     avatarEmoji: r.avatar_emoji || '🙂',
     isVerified: r.is_verified,
-    isTopConnector: !!r.was_ever_top_connector,
+    isTopConnector: topConnectorEnabled && !!r.was_ever_top_connector,
     globalPoints: parseInt(r.global_points),
   }));
 }
