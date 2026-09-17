@@ -69,6 +69,22 @@ async function getSpenderStatus({ userId, arenaSessionId }, { db }) {
   return { isTopSpender: row ? row.is_top_spender : false };
 }
 
+/**
+ * Stesso identico principio di isBigSpenderEnabled qui sopra, per
+ * coerenza voluta esplicitamente in dashboard — un solo interruttore
+ * ("Top Connector" in dashboard) spegne il Motore Fisico (riflesso
+ * punti Squad via QR) e il Motore Algoritmico (bonus scoperta) ovunque
+ * nell'app, oltre al badge stesso in classifica/profilo (v. gli stessi
+ * controlli duplicati in populive-ranking-queries.js,
+ * populive-profile-onboarding.js e populive-points-engine.js — stesso
+ * schema replicato di Big Spender, non un'unica funzione condivisa,
+ * per evitare un giro di dipendenze circolari con questo file).
+ */
+async function isTopConnectorEnabled({ db }) {
+  const flag = await db.query(`SELECT is_enabled FROM feature_flags WHERE feature_key = 'top_connector'`);
+  return flag ? flag.is_enabled : true; // se manca la riga, di default acceso (comportamento identico a oggi)
+}
+
 
 // ------------------------------------------------------------
 // A) MOTORE FISICO — Squad via QR
@@ -116,6 +132,10 @@ async function joinSquad({ connectorId, memberId, arenaSessionId, tableQrCode, w
  * Connector della sua squad, se ne ha una per questa sessione.
  */
 async function reflectPointsToConnector({ memberId, arenaSessionId, memberPointsEarned }, { db, io }) {
+  if (!(await isTopConnectorEnabled({ db }))) {
+    return { reflected: false, reason: 'top_connector_disabled' };
+  }
+
   const membership = await db.query(`
     SELECT connector_id FROM squad_memberships
     WHERE member_id = $1 AND arena_session_id = $2
@@ -152,6 +172,10 @@ async function reflectPointsToConnector({ memberId, arenaSessionId, memberPoints
  * La valutazione vera avviene più tardi, nel job schedulato.
  */
 async function placeDiscoveryMarker({ connectorId, discoveredUserId, arenaSessionId }, { db }) {
+  if (!(await isTopConnectorEnabled({ db }))) {
+    return { placed: false, reason: 'top_connector_disabled' };
+  }
+
   const status = await getConnectorStatus({ userId: connectorId, arenaSessionId }, { db });
   if (!status.isTopConnector) return { placed: false, reason: 'not_a_connector_this_session' };
 
@@ -180,12 +204,21 @@ async function evaluatePendingDiscoveryMarkers({ db, io }) {
     WHERE evaluated_at IS NULL AND created_at <= $1
   `, [cutoff]);
 
+  // Letto una sola volta per l'intero giro del job, non per ogni
+  // marker — se qualcuno lo riaccende A METÀ esecuzione, il giro in
+  // corso resta coerente con lo stato letto all'inizio, i marker
+  // restanti verranno rivalutati al giro successivo (ogni 15 minuti).
+  const topConnectorEnabled = await isTopConnectorEnabled({ db });
+
   for (const marker of pendingMarkers) {
     const currentPoints = await getLocalPoints(
       { userId: marker.discovered_user_id, arenaSessionId: marker.arena_session_id }, { db }
     );
     const surge = currentPoints - marker.points_at_vote_time;
-    const didSurge = surge >= DISCOVERY_SURGE_THRESHOLD;
+    // Se il Top Connector è spento dalla dashboard, il marker viene
+    // comunque segnato come valutato (niente coda che si accumula in
+    // silenzio), semplicemente senza mai assegnare il bonus.
+    const didSurge = topConnectorEnabled && surge >= DISCOVERY_SURGE_THRESHOLD;
 
     if (didSurge) {
       await awardPoints({
@@ -243,6 +276,7 @@ async function recalculateTopConnectors(arenaSessionId, { db }) {
 }
 
 async function getConnectorStatus({ userId, arenaSessionId }, { db }) {
+  if (!(await isTopConnectorEnabled({ db }))) return { contributionPoints: 0, isTopConnector: false };
   const row = await db.query(`
     SELECT contribution_points, is_top_connector FROM connector_status
     WHERE user_id = $1 AND arena_session_id = $2
@@ -377,4 +411,5 @@ module.exports = {
   awardTableSpendingBonusByVenue,
   updateVenueSpendingConfig,
   isBigSpenderEnabled,
+  isTopConnectorEnabled,
 };
