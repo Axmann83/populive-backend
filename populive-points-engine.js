@@ -129,10 +129,18 @@ async function computePoints({ receiverId, source, senderId, arenaSessionId, via
   let globalOnlyBonus = 0;
 
   if (senderId && arenaSessionId) {
-    const senderStatus = await db.query(`
+    // Stesso interruttore condiviso ("Top Connector" in dashboard,
+    // stesso principio di Big Spender) — letto qui invece che tramite
+    // isTopConnectorEnabled di populive-connector-engine.js per non
+    // creare una dipendenza circolare (quel file richiede awardPoints
+    // da QUESTO file).
+    const topConnectorFlag = await db.query(`SELECT is_enabled FROM feature_flags WHERE feature_key = 'top_connector'`);
+    const topConnectorEnabled = topConnectorFlag ? topConnectorFlag.is_enabled : true;
+
+    const senderStatus = topConnectorEnabled ? await db.query(`
       SELECT is_top_connector FROM connector_status
       WHERE user_id = $1 AND arena_session_id = $2
-    `, [senderId, arenaSessionId]);
+    `, [senderId, arenaSessionId]) : null;
 
     if (senderStatus && senderStatus.is_top_connector) {
       // La Pulse (qualunque tier) è sempre esente dal tetto: costa
