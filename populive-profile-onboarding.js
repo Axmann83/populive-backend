@@ -231,7 +231,12 @@ async function getPublicProfile({ userId, arenaSessionId, viewerId }, { db }) {
       SELECT is_top_connector FROM connector_status
       WHERE user_id = $1 AND arena_session_id = $2
     `, [userId, arenaSessionId]);
-    isTopConnector = !!connectorRow?.is_top_connector;
+    // Stesso principio del Big Spender qui sotto: un solo interruttore
+    // ("Top Connector" in dashboard) spegne il dato ovunque nell'app,
+    // controllato qui alla lettura — coerenza voluta esplicitamente.
+    const topConnectorFlag = await db.query(`SELECT is_enabled FROM feature_flags WHERE feature_key = 'top_connector'`);
+    const topConnectorEnabled = topConnectorFlag ? topConnectorFlag.is_enabled : true;
+    isTopConnector = topConnectorEnabled && !!connectorRow?.is_top_connector;
 
     const spenderRow = await db.query(`
       SELECT is_top_spender FROM spender_status
