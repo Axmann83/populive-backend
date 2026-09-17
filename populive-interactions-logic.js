@@ -12,6 +12,16 @@
 
 const { awardPoints, awardSenderPoints, LIKE_SENDER_FREE_LIMIT, MAX_DISTINCT_VIEWS_PER_SESSION } = require('./populive-points-engine');
 const { openChatConversation } = require('./populive-chat-logic');
+// COLLEGAMENTO MANCANTE, sistemato insieme all'interruttore Top
+// Connector (17/9): queste due funzioni esistevano già in
+// populive-connector-engine.js ma nessun punto dell'app le
+// richiamava mai — il riflesso punti "Squad via QR" al Connector del
+// tavolo e il piazzamento del marker per il bonus scoperta non
+// scattavano MAI, a prescindere da questo interruttore. Stessa
+// identica situazione già trovata e risolta per il Big Spender
+// (awardTableSpendingBonus prima non era collegata a nessun
+// endpoint).
+const { reflectPointsToConnector, placeDiscoveryMarker } = require('./populive-connector-engine');
 
 
 // ------------------------------------------------------------
@@ -115,6 +125,23 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type, via
       viaHistoricalBoard,
     }, { db, io });
     receiverLocalPoints = result.localPoints;
+
+    // Motore Fisico Top Connector — quota dei punti appena guadagnati
+    // dal destinatario riflessa al Connector della SUA squadra (se ne
+    // ha una in questa Arena). No-op silenzioso se non fa parte di
+    // nessuna squadra, o se l'interruttore è spento.
+    await reflectPointsToConnector({
+      memberId: receiverId, arenaSessionId, memberPointsEarned: receiverLocalPoints,
+    }, { db, io });
+
+    // Motore Algoritmico Top Connector — se chi INVIA questo
+    // Like/Superlike è un Top Connector in questa Arena, piazza il
+    // marker di "scoperta" sul destinatario (il bonus vero, se scatta,
+    // arriva più tardi dal job schedulato). No-op silenzioso se il
+    // mittente non è un Connector, o se l'interruttore è spento.
+    await placeDiscoveryMarker({
+      connectorId: senderId, discoveredUserId: receiverId, arenaSessionId,
+    }, { db });
   }
 
   const newInteraction = await db.query(`
@@ -572,9 +599,21 @@ async function createPulseRecord({ senderId, receiverId, arenaSessionId, drinkNa
   // dell'utente: i punti misurano quanto sei notato, non quante
   // interazioni accetti, ed evita ogni pressione sottile ad
   // accettare "solo per convenienza".
-  await awardPoints({
+  const pulseAwardResult = await awardPoints({
     receiverId, arenaSessionId, source: `pulse_${tier}`, senderId,
   }, { db, io });
+
+  // Stesso identico principio di sendInteraction qui sopra — Motore
+  // Fisico (riflesso al Connector della squadra del destinatario) e
+  // Motore Algoritmico (marker di scoperta, se chi manda la Pulse è
+  // lui stesso un Top Connector) applicati anche qui, non solo per
+  // Like/Superlike.
+  await reflectPointsToConnector({
+    memberId: receiverId, arenaSessionId, memberPointsEarned: pulseAwardResult.localPoints,
+  }, { db, io });
+  await placeDiscoveryMarker({
+    connectorId: senderId, discoveredUserId: receiverId, arenaSessionId,
+  }, { db });
 
   // Notifica privata in tempo reale SOLO al destinatario — mai alla
   // stanza dell'Arena intera, questo è un evento personale.
