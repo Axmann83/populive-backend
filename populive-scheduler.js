@@ -16,7 +16,7 @@
  */
 
 const { closeConversationsForSession, purgeExpiredChatMessages } = require('./populive-chat-logic');
-const { evaluatePendingDiscoveryMarkers } = require('./populive-connector-engine');
+const { evaluatePendingDiscoveryMarkers, awardTopTalentBonuses } = require('./populive-connector-engine');
 const { refundAbandonedPulsesForSession } = require('./populive-interactions-logic');
 
 const TICK_INTERVAL_MS = 5 * 60 * 1000; // ogni 5 minuti — abbastanza spesso da non far
@@ -195,6 +195,16 @@ async function closeSessionIfOpen(venue, { db, redis, io }) {
   // locale. Le Pulse GIÀ accettate non c'entrano, restano valide
   // come deciso in precedenza.
   await refundAbandonedPulsesForSession(openSession.id, { db });
+
+  // Bonus "talent scout" di fine serata (17/9) — i Connector dei tre
+  // tavoli diversi con dentro la persona più popolare della sera.
+  // Va fatto QUI, una volta sola alla chiusura vera, mai durante la
+  // serata (altrimenti "chi è il più popolare" cambierebbe in corsa).
+  try {
+    await awardTopTalentBonuses(openSession.id, { db, io });
+  } catch (err) {
+    console.error(`[scheduler] errore nel bonus talent scout per sessione ${openSession.id}:`, err);
+  }
 
   // Pulizia dello stato "vivo" in Redis — il radar in tempo reale
   // e il contatore soglia di questa sessione non servono più.
