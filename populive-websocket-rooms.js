@@ -158,28 +158,34 @@ function setupWebSocket(httpServer, { redis, db }) {
       const rooms = [...socket.rooms].filter(r => r.startsWith('arena_'));
       rooms.forEach(r => socket.leave(r));
     }
-
-    // Manda un evento a chiunque sia nella stanza, ESCLUDENDO ogni
-    // connessione che appartiene allo STESSO utente — non solo la
-    // connessione esatta da cui parte l'evento. Serve proprio a
-    // evitare che una seconda scheda/dispositivo con lo stesso
-    // account veda "il proprio ingresso" comparire nel radar come
-    // se fosse un'altra persona.
-    function broadcastToOthers(io, room, excludeUserId, eventName, payload) {
-      const socketIds = io.sockets.adapter.rooms.get(room) || new Set();
-      for (const socketId of socketIds) {
-        const target = io.sockets.sockets.get(socketId);
-        if (target?.data?.userId && target.data.userId !== excludeUserId) {
-          target.emit(eventName, payload);
-        }
-      }
-    }
   });
 
   return io;
 }
 
-module.exports = { setupWebSocket };
+// Manda un evento a chiunque sia nella stanza, ESCLUDENDO ogni
+// connessione che appartiene allo STESSO utente — non solo la
+// connessione esatta da cui parte l'evento. Serve proprio a
+// evitare che una seconda scheda/dispositivo con lo stesso
+// account veda "il proprio ingresso" comparire nel radar come
+// se fosse un'altra persona.
+//
+// Spostata fuori da setupWebSocket (18/9) e esportata: serve anche
+// fuori dal mondo WebSocket puro, per il check-in che decade da
+// solo per distanza (v. populive-checkin-logic.js) — stesso identico
+// avviso "left" già usato alla disconnessione, riusato invece che
+// duplicato.
+function broadcastToOthers(io, room, excludeUserId, eventName, payload) {
+  const socketIds = io.sockets.adapter.rooms.get(room) || new Set();
+  for (const socketId of socketIds) {
+    const target = io.sockets.sockets.get(socketId);
+    if (target?.data?.userId && target.data.userId !== excludeUserId) {
+      target.emit(eventName, payload);
+    }
+  }
+}
+
+module.exports = { setupWebSocket, broadcastToOthers };
 
 
 /**
