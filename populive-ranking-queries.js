@@ -33,13 +33,13 @@ async function getLocalRanking({ arenaSessionId, hashtag, gender }, { db }) {
 
   if (gender) {
     conditions.push(`u.gender_for_stats = $${paramIndex}`);
-    params.push(gender);
-    paramIndex++;
+    params.push(gender); // ultimo parametro: nessun altro segnaposto dopo questo
   }
 
   const extraWhere = conditions.length > 0 ? `AND ${conditions.join(' AND ')}` : '';
 
-  const rows = await db.queryAll(`
+  const rows = await db.queryAll(
+    `
     SELECT
       u.id AS user_id,
       u.display_name,
@@ -63,7 +63,9 @@ async function getLocalRanking({ arenaSessionId, hashtag, gender }, { db }) {
     WHERE true ${extraWhere} AND u.deleted_at IS NULL
     GROUP BY u.id, u.display_name, u.avatar_emoji, u.photo_url, cs.is_top_connector, ss.is_top_spender
     ORDER BY local_points DESC
-  `, params);
+  `,
+    params
+  );
 
   // Stesso interruttore condiviso ("Big Spender" in dashboard) — un
   // solo controllo qui invece che dentro ogni riga della query.
@@ -115,7 +117,8 @@ async function getGlobalRanking({ limit = 100, hashtag, gender }, { db }) {
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
   params.push(limit);
 
-  const rows = await db.queryAll(`
+  const rows = await db.queryAll(
+    `
     SELECT
       u.id AS user_id,
       u.display_name,
@@ -131,7 +134,9 @@ async function getGlobalRanking({ limit = 100, hashtag, gender }, { db }) {
     GROUP BY u.id, u.display_name, u.avatar_emoji, u.photo_url, fb.user_id
     ORDER BY global_points DESC
     LIMIT $${paramIndex}
-  `, params);
+  `,
+    params
+  );
 
   return rows.map((r, i) => ({
     rank: i + 1,
@@ -166,7 +171,16 @@ async function getUserRankingSummary({ userId, arenaSessionId, viewerId }, { db 
   if (viewerId && viewerId !== userId) {
     const prefs = await db.query(`SELECT show_ranking_on_profile FROM users WHERE id = $1`, [userId]);
     if (prefs && prefs.show_ranking_on_profile === false) {
-      return { hidden: true, localRank: null, localPoints: null, globalRank: null, globalPoints: null, displayName, photoUrl, avatarEmoji };
+      return {
+        hidden: true,
+        localRank: null,
+        localPoints: null,
+        globalRank: null,
+        globalPoints: null,
+        displayName,
+        photoUrl,
+        avatarEmoji,
+      };
     }
   }
 
@@ -180,13 +194,17 @@ async function getUserRankingSummary({ userId, arenaSessionId, viewerId }, { db 
   let localPoints = 0;
   let localRankRow = { rank: null };
   if (hasValidSession) {
-    const localPointsRow = await db.query(`
+    const localPointsRow = await db.query(
+      `
       SELECT COALESCE(SUM(points), 0) AS total FROM points_ledger
       WHERE user_id = $1 AND arena_session_id = $2 AND counts_toward_local = true
-    `, [userId, arenaSessionId]);
+    `,
+      [userId, arenaSessionId]
+    );
     localPoints = parseInt(localPointsRow.total) || 0;
 
-    localRankRow = await db.query(`
+    localRankRow = await db.query(
+      `
       SELECT COUNT(*) + 1 AS rank
       FROM (
         SELECT user_id, SUM(points) AS pts
@@ -195,15 +213,21 @@ async function getUserRankingSummary({ userId, arenaSessionId, viewerId }, { db 
         GROUP BY user_id
         HAVING SUM(points) > $2
       ) higher_ranked
-    `, [arenaSessionId, localPoints]);
+    `,
+      [arenaSessionId, localPoints]
+    );
   }
 
-  const globalPointsRow = await db.query(`
+  const globalPointsRow = await db.query(
+    `
     SELECT COALESCE(SUM(points), 0) AS total FROM points_ledger WHERE user_id = $1
-  `, [userId]);
+  `,
+    [userId]
+  );
   const globalPoints = parseInt(globalPointsRow.total) || 0;
 
-  const globalRankRow = await db.query(`
+  const globalRankRow = await db.query(
+    `
     SELECT COUNT(*) + 1 AS rank
     FROM (
       SELECT user_id, SUM(points) AS pts
@@ -211,7 +235,9 @@ async function getUserRankingSummary({ userId, arenaSessionId, viewerId }, { db 
       GROUP BY user_id
       HAVING SUM(points) > $1
     ) higher_ranked
-  `, [globalPoints]);
+  `,
+    [globalPoints]
+  );
 
   return {
     hidden: false,
@@ -245,37 +271,52 @@ async function getWelcomeBackSummary({ userId }, { db }) {
   // blocco vero, la seconda richiesta aspetta che la prima finisca
   // e poi legge il valore già aggiornato, coerente con quanto ha
   // già mostrato la prima.
-  const result = await db.query(`
+  const result = await db.query(
+    `
     UPDATE users AS u
     SET last_seen_at = now()
     FROM (SELECT last_seen_at FROM users WHERE id = $1 FOR UPDATE) AS old
     WHERE u.id = $1
     RETURNING old.last_seen_at AS previous_last_seen_at
-  `, [userId]);
+  `,
+    [userId]
+  );
   if (!result) return { success: false, reason: 'user_not_found' };
 
   const since = result.previous_last_seen_at;
 
-  const pointsRow = await db.query(`
+  const pointsRow = await db.query(
+    `
     SELECT COALESCE(SUM(points), 0) AS total FROM points_ledger
     WHERE user_id = $1 AND created_at > $2
-  `, [userId, since]);
+  `,
+    [userId, since]
+  );
   const pointsEarned = parseInt(pointsRow.total) || 0;
 
-  const newLikes = await db.query(`
+  const newLikes = await db.query(
+    `
     SELECT COUNT(*) FROM interactions
     WHERE receiver_id = $1 AND type = 'like' AND created_at > $2
-  `, [userId, since]);
+  `,
+    [userId, since]
+  );
 
-  const newSuperlikes = await db.query(`
+  const newSuperlikes = await db.query(
+    `
     SELECT COUNT(*) FROM interactions
     WHERE receiver_id = $1 AND type = 'superlike' AND created_at > $2
-  `, [userId, since]);
+  `,
+    [userId, since]
+  );
 
-  const newPulses = await db.query(`
+  const newPulses = await db.query(
+    `
     SELECT COUNT(*) FROM pulses
     WHERE receiver_id = $1 AND created_at > $2
-  `, [userId, since]);
+  `,
+    [userId, since]
+  );
 
   const hasNews = pointsEarned > 0 || newLikes > 0 || newSuperlikes > 0 || newPulses > 0;
 
@@ -288,7 +329,6 @@ async function getWelcomeBackSummary({ userId }, { db }) {
     newPulses: parseInt(newPulses) || 0,
   };
 }
-
 
 /**
  * ============================================================
@@ -304,7 +344,8 @@ async function getWelcomeBackSummary({ userId }, { db }) {
  * ============================================================
  */
 async function searchUsersByHashtag({ hashtag, limit = 50 }, { db }) {
-  const rows = await db.queryAll(`
+  const rows = await db.queryAll(
+    `
     SELECT
       u.id AS user_id,
       u.display_name,
@@ -323,7 +364,9 @@ async function searchUsersByHashtag({ hashtag, limit = 50 }, { db }) {
     GROUP BY u.id, u.display_name, u.phone_number, u.photo_url, u.avatar_emoji, u.is_verified
     ORDER BY global_points DESC
     LIMIT $2
-  `, [hashtag.replace(/^#/, '').trim(), limit]);
+  `,
+    [hashtag.replace(/^#/, '').trim(), limit]
+  );
 
   // Stesso interruttore di getLocalRanking — così se il Top Connector
   // è spento, non compare come "vero" nemmeno qui, dove viene
@@ -353,19 +396,32 @@ async function searchUsersByHashtag({ hashtag, limit = 50 }, { db }) {
  * identici (i punti vanno comunque alla classifica generale).
  */
 async function checkLocalRankingThreshold({ arenaSessionId }, { db }) {
-  const venueRow = await db.query(`
+  const venueRow = await db.query(
+    `
     SELECT v.min_users_for_local_ranking
     FROM arena_sessions a JOIN venues v ON v.id = a.venue_id
     WHERE a.id = $1
-  `, [arenaSessionId]);
+  `,
+    [arenaSessionId]
+  );
   const minRequired = venueRow?.min_users_for_local_ranking ?? 5;
 
-  const checkinCountRow = await db.query(`
+  const checkinCountRow = await db.query(
+    `
     SELECT COUNT(DISTINCT user_id) AS count FROM checkins WHERE arena_session_id = $1
-  `, [arenaSessionId]);
+  `,
+    [arenaSessionId]
+  );
   const currentCount = parseInt(checkinCountRow?.count) || 0;
 
   return { belowThreshold: currentCount < minRequired, currentCount, minRequired };
 }
 
-module.exports = { getLocalRanking, getGlobalRanking, getUserRankingSummary, getWelcomeBackSummary, searchUsersByHashtag, checkLocalRankingThreshold };
+module.exports = {
+  getLocalRanking,
+  getGlobalRanking,
+  getUserRankingSummary,
+  getWelcomeBackSummary,
+  searchUsersByHashtag,
+  checkLocalRankingThreshold,
+};

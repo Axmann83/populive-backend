@@ -13,16 +13,16 @@ const BASE_POINTS = {
   // Valori DEFINITIVI, decisi insieme — piccoli e interi apposta,
   // per restare leggibili in classifica anche dopo mesi di utilizzo
   // reale (mai rischiare numeri enormi difficili da confrontare).
-  profile_view:              2,   // solo la prima visita per coppia visitatore/visitato/serata, e solo le prime N persone diverse viste a testa (v. MAX_DISTINCT_VIEWS_PER_SESSION)
-  like_received:             5,   // solo i primi N like/giorno per ricevente contano (rate limit già deciso)
-  superlike_received:        8,
-  pulse_standalone:          10,
-  pulse_like:                10,   // + bonus separato per ENTRAMBI se vince il minigioco (vedi pulse_like_match sotto)
-  pulse_like_match:           5,   // bonus al RICEVENTE per un match riuscito nel minigioco — +30% incluso via MULTIPLIERS.guess_match_bonus (5*1.3≈7), si somma correttamente a eventuali altri bonus (Premium, Founder, ecc.). Abbassato da 10 a 5: con 10 il totale (base pulse_like 10 + bonus 13) arrivava a 23, troppo vicino/sopra al Pulse+Superlike.
-  like_match:                 5,   // bonus a ENTRAMBI per un match tra Like semplici (reciprocità) — FISSO, niente +30%: qui non c'è nessun minigioco da skippare, il match è automatico appena l'altro ricambia.
-  pulse_super:               20,   // il valore più alto tra tutte le interazioni dirette, apposta — è l'unica garantita al 100% (nessun minigioco, nessuna fortuna) e richiede una risorsa vera in più (il Superlike). Margine modesto sopra al tetto massimo teorico del Pulse+Like con match riuscito (17).
-  mission_completed:        15,   // missione sponsorizzata da brand
-  connector_discovery_bonus: 18,  // Top Connector: bonus per aver "scoperto" un profilo che poi esplode
+  profile_view: 2, // solo la prima visita per coppia visitatore/visitato/serata, e solo le prime N persone diverse viste a testa (v. MAX_DISTINCT_VIEWS_PER_SESSION)
+  like_received: 5, // solo i primi N like/giorno per ricevente contano (rate limit già deciso)
+  superlike_received: 8,
+  pulse_standalone: 10,
+  pulse_like: 10, // + bonus separato per ENTRAMBI se vince il minigioco (vedi pulse_like_match sotto)
+  pulse_like_match: 5, // bonus al RICEVENTE per un match riuscito nel minigioco — +30% incluso via MULTIPLIERS.guess_match_bonus (5*1.3≈7), si somma correttamente a eventuali altri bonus (Premium, Founder, ecc.). Abbassato da 10 a 5: con 10 il totale (base pulse_like 10 + bonus 13) arrivava a 23, troppo vicino/sopra al Pulse+Superlike.
+  like_match: 5, // bonus a ENTRAMBI per un match tra Like semplici (reciprocità) — FISSO, niente +30%: qui non c'è nessun minigioco da skippare, il match è automatico appena l'altro ricambia.
+  pulse_super: 20, // il valore più alto tra tutte le interazioni dirette, apposta — è l'unica garantita al 100% (nessun minigioco, nessuna fortuna) e richiede una risorsa vera in più (il Superlike). Margine modesto sopra al tetto massimo teorico del Pulse+Like con match riuscito (17).
+  mission_completed: 15, // missione sponsorizzata da brand
+  connector_discovery_bonus: 18, // Top Connector: bonus per aver "scoperto" un profilo che poi esplode
   // Top Connector — bonus "talent scout" di fine serata (17/9, idea
   // dell'utente): quando l'Arena chiude, i Connector dei tre TAVOLI
   // DIVERSI con dentro la persona più popolare della serata prendono
@@ -30,23 +30,23 @@ const BASE_POINTS = {
   // stesso Connector nella stessa sera anche se ha in squadra sia il
   // 1° che il 4° più popolare. Valori INDICATIVI, da tarare con le
   // serate vere come tutto il resto di questa tabella.
-  connector_top_talent_1:   30,   // tavolo con la persona più popolare della serata
-  connector_top_talent_2:   20,   // secondo tavolo più "in alto"
-  connector_top_talent_3:   10,   // terzo tavolo più "in alto"
+  connector_top_talent_1: 30, // tavolo con la persona più popolare della serata
+  connector_top_talent_2: 20, // secondo tavolo più "in alto"
+  connector_top_talent_3: 10, // terzo tavolo più "in alto"
 };
 
 // Punti a chi COMPIE l'azione (non solo a chi la riceve) — valori
 // fissi decisi insieme, non più calcolati come "percentuale" del
 // valore del destinatario (evita decimali/arrotondamenti ovunque).
 const SENDER_POINTS = {
-  profile_view:        1,
-  like_received:       2,
-  superlike_received:  3,
-  pulse_standalone:     4,
-  pulse_like:           4,
-  pulse_super:          14,   // stesso principio: sopra il tetto massimo teorico lato mittente del Pulse+Like con match (11).
-  pulse_like_match:     7,  // 5 base + 30% già incluso (5*1,3=6,5, arrotondato a 7) — abbassato da 13, stesso motivo del lato ricevente.
-  like_match:           5,  // FISSO, stesso valore del ricevente — nessun +30% qui.
+  profile_view: 1,
+  like_received: 2,
+  superlike_received: 3,
+  pulse_standalone: 4,
+  pulse_like: 4,
+  pulse_super: 14, // stesso principio: sopra il tetto massimo teorico lato mittente del Pulse+Like con match (11).
+  pulse_like_match: 7, // 5 base + 30% già incluso (5*1,3=6,5, arrotondato a 7) — abbassato da 13, stesso motivo del lato ricevente.
+  like_match: 5, // FISSO, stesso valore del ricevente — nessun +30% qui.
 };
 
 // Bonus a ENTRAMBI se il minigioco Pulse+Like va a segno (match) —
@@ -64,11 +64,10 @@ const SENDER_POINTS = {
 // radar all'infinito per accumulare punti senza sforzo reale.
 const MAX_DISTINCT_VIEWS_PER_SESSION = 20;
 
-
 const MULTIPLIERS = {
-  premium:        1.2,   // profilo Premium a pagamento
-  founder_global: 1.5,   // braccialetto founder — SOLO sul globale, mai sul locale (già deciso)
-  sender_share:   0.3,   // chi INVIA un'interazione riceve il 30% del punteggio corrispondente
+  premium: 1.2, // profilo Premium a pagamento
+  founder_global: 1.5, // braccialetto founder — SOLO sul globale, mai sul locale (già deciso)
+  sender_share: 0.3, // chi INVIA un'interazione riceve il 30% del punteggio corrispondente
   top_connector_vote: 1.5, // il voto di un Top Connector vale 1.5x — solo la prima volta per persona per like/superlike, sempre per la Pulse (già limitata dal costo reale)
   consent_per_toggle: 0.05, // +5% per ciascuna delle 3 scelte facoltative attive in Impostazioni (missioni sponsorizzate/bacheca storica/ricevi Pulse) — cumulabile fino a +15% con tutte e tre attive. Si applica SIA ai punti che ricevi SIA a quelli che guadagni inviando, ed è sempre calcolato al momento (mai "congelato"): se spunti o togli una casella, il moltiplicatore cambia dalla prossima interazione in poi, coerente con la sua natura reversibile.
   verified_bonus: 0.05, // +5% per chi ha il profilo Verificato — a differenza delle 3 scelte sopra, questo NON si accende/spegne mai (badge acquistato una volta), quindi si SOMMA in modo semplice sopra gli altri invece di moltiplicarsi insieme — su 10 punti base: 15% (tutte e 3 le scelte) + 5% (verificato) = 2 punti bonus totali, non 2,075. Vale meno proprio perché non è reversibile come le altre.
@@ -96,10 +95,13 @@ const LIKE_SENDER_FREE_LIMIT = 10;
  * chi le manda o le riceve.
  */
 async function getConsentMultiplier(userId, { db }) {
-  const user = await db.query(`
+  const user = await db.query(
+    `
     SELECT sponsored_missions_enabled, appears_in_historical_search, receive_pulses_enabled, is_verified
     FROM users WHERE id = $1
-  `, [userId]);
+  `,
+    [userId]
+  );
 
   if (!user) return 1;
 
@@ -113,7 +115,7 @@ async function getConsentMultiplier(userId, { db }) {
   // spiegazione sopra su MULTIPLIERS.verified_bonus).
   const verifiedBonus = user.is_verified ? MULTIPLIERS.verified_bonus : 0;
 
-  return 1 + (activeCount * MULTIPLIERS.consent_per_toggle) + verifiedBonus;
+  return 1 + activeCount * MULTIPLIERS.consent_per_toggle + verifiedBonus;
 }
 
 /**
@@ -131,9 +133,12 @@ async function computePoints({ receiverId, source, senderId, arenaSessionId, via
   const base = BASE_POINTS[source];
   if (base === undefined) throw new Error(`Punteggio non definito per: ${source}`);
 
-  const receiver = await db.query(`
+  const receiver = await db.query(
+    `
     SELECT is_premium FROM users WHERE id = $1
-  `, [receiverId]);
+  `,
+    [receiverId]
+  );
 
   let localPoints = base;
   let globalOnlyBonus = 0;
@@ -147,10 +152,15 @@ async function computePoints({ receiverId, source, senderId, arenaSessionId, via
     const topConnectorFlag = await db.query(`SELECT is_enabled FROM feature_flags WHERE feature_key = 'top_connector'`);
     const topConnectorEnabled = topConnectorFlag ? topConnectorFlag.is_enabled : true;
 
-    const senderStatus = topConnectorEnabled ? await db.query(`
+    const senderStatus = topConnectorEnabled
+      ? await db.query(
+          `
       SELECT is_top_connector FROM connector_status
       WHERE user_id = $1 AND arena_session_id = $2
-    `, [senderId, arenaSessionId]) : null;
+    `,
+          [senderId, arenaSessionId]
+        )
+      : null;
 
     if (senderStatus && senderStatus.is_top_connector) {
       // La Pulse (qualunque tier) è sempre esente dal tetto: costa
@@ -197,9 +207,12 @@ async function computePoints({ receiverId, source, senderId, arenaSessionId, via
     localPoints = Math.round(localPoints * receiverConsentMultiplier);
   }
 
-  const isFounder = await db.query(`
+  const isFounder = await db.query(
+    `
     SELECT 1 FROM founder_bracelets WHERE user_id = $1
-  `, [receiverId]);
+  `,
+    [receiverId]
+  );
   if (isFounder) {
     // Il bonus founder si applica SOLO all'accumulo globale, mai al
     // locale — coerente con "si riparte tutti alla pari ogni sera".
@@ -215,18 +228,27 @@ async function computePoints({ receiverId, source, senderId, arenaSessionId, via
  * a tutta la stanza — è la classifica che tutti guardano).
  */
 async function awardPoints({ receiverId, arenaSessionId, source, senderId, viaHistoricalBoard }, { db, io }) {
-  const { localPoints, globalOnlyBonus } = await computePoints({ receiverId, source, senderId, arenaSessionId, viaHistoricalBoard }, { db });
+  const { localPoints, globalOnlyBonus } = await computePoints(
+    { receiverId, source, senderId, arenaSessionId, viaHistoricalBoard },
+    { db }
+  );
 
-  await db.query(`
+  await db.query(
+    `
     INSERT INTO points_ledger (user_id, arena_session_id, points, source, counts_toward_local)
     VALUES ($1, $2, $3, $4, true)
-  `, [receiverId, arenaSessionId, localPoints, source]);
+  `,
+    [receiverId, arenaSessionId, localPoints, source]
+  );
 
   if (globalOnlyBonus > 0) {
-    await db.query(`
+    await db.query(
+      `
       INSERT INTO points_ledger (user_id, arena_session_id, points, source, counts_toward_local)
       VALUES ($1, NULL, $2, $3, false)
-    `, [receiverId, globalOnlyBonus, `${source}_founder_bonus`]);
+    `,
+      [receiverId, globalOnlyBonus, `${source}_founder_bonus`]
+    );
   }
 
   io.to(`arena_${arenaSessionId}`).emit('points_update', {
@@ -254,10 +276,13 @@ async function awardSenderPoints({ senderId, arenaSessionId, source }, { db, io 
     senderPoints = Math.round(senderPoints * senderConsentMultiplier);
   }
 
-  await db.query(`
+  await db.query(
+    `
     INSERT INTO points_ledger (user_id, arena_session_id, points, source, counts_toward_local)
     VALUES ($1, $2, $3, $4, true)
-  `, [senderId, arenaSessionId, senderPoints, `${source}_sent`]);
+  `,
+    [senderId, arenaSessionId, senderPoints, `${source}_sent`]
+  );
 
   io.to(`arena_${arenaSessionId}`).emit('points_update', {
     userId: senderId,
@@ -277,14 +302,27 @@ async function awardSenderPoints({ senderId, arenaSessionId, source }, { db, io 
  */
 async function hasAlreadyBoosted({ senderId, receiverId, source, arenaSessionId }, { db }) {
   const interactionType = source === 'superlike_received' ? 'superlike' : 'like';
-  const priorCount = await db.query(`
+  const priorCount = await db.query(
+    `
     SELECT COUNT(*) FROM interactions
     WHERE sender_id = $1 AND receiver_id = $2 AND type = $3 AND arena_session_id = $4
-  `, [senderId, receiverId, interactionType, arenaSessionId]);
+  `,
+    [senderId, receiverId, interactionType, arenaSessionId]
+  );
   // Nota: questa funzione va chiamata PRIMA di inserire la nuova
   // riga in "interactions" — se la riga corrente fosse già stata
   // scritta, il conteggio includerebbe anche lei per errore.
   return priorCount > 0;
 }
 
-module.exports = { BASE_POINTS, SENDER_POINTS, MULTIPLIERS, LIKE_SENDER_FREE_LIMIT, MAX_DISTINCT_VIEWS_PER_SESSION, computePoints, awardPoints, awardSenderPoints, getConsentMultiplier };
+module.exports = {
+  BASE_POINTS,
+  SENDER_POINTS,
+  MULTIPLIERS,
+  LIKE_SENDER_FREE_LIMIT,
+  MAX_DISTINCT_VIEWS_PER_SESSION,
+  computePoints,
+  awardPoints,
+  awardSenderPoints,
+  getConsentMultiplier,
+};

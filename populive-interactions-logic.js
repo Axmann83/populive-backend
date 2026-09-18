@@ -10,7 +10,12 @@
  * ============================================================
  */
 
-const { awardPoints, awardSenderPoints, LIKE_SENDER_FREE_LIMIT, MAX_DISTINCT_VIEWS_PER_SESSION } = require('./populive-points-engine');
+const {
+  awardPoints,
+  awardSenderPoints,
+  LIKE_SENDER_FREE_LIMIT,
+  MAX_DISTINCT_VIEWS_PER_SESSION,
+} = require('./populive-points-engine');
 const { openChatConversation } = require('./populive-chat-logic');
 // COLLEGAMENTO MANCANTE, sistemato insieme all'interruttore Top
 // Connector (17/9): queste due funzioni esistevano già in
@@ -23,11 +28,10 @@ const { openChatConversation } = require('./populive-chat-logic');
 // endpoint).
 const { reflectPointsToConnector, placeDiscoveryMarker } = require('./populive-connector-engine');
 
-
 // ------------------------------------------------------------
 // PARTE 0 — Like / Superlike semplici (senza Pulse allegata)
 // ------------------------------------------------------------
-async function sendInteraction({ senderId, receiverId, arenaSessionId, type, viaHistoricalBoard }, { db, io, redis }) {
+async function sendInteraction({ senderId, receiverId, arenaSessionId, type, viaHistoricalBoard }, { db, io }) {
   // type: 'like' | 'superlike'
 
   // Controllo VERO, non solo un'interfaccia che nasconde il
@@ -60,9 +64,12 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type, via
   const isTestSender = !!senderTestRow?.is_test_account;
 
   if (!isTestSender) {
-    const blocked = await db.query(`
+    const blocked = await db.query(
+      `
       SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2 AND (arena_session_id IS NULL OR arena_session_id = $3 OR (reason = 'ignored_cooldown' AND expires_at > now()))
-    `, [receiverId, senderId, arenaSessionId]);
+    `,
+      [receiverId, senderId, arenaSessionId]
+    );
     if (blocked) return { success: false, reason: 'blocked_by_receiver' };
 
     // NUOVO — non più di un Like e non più di un Superlike alla
@@ -70,12 +77,18 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type, via
     // Il tipo è compreso nel controllo: aver già mandato un Like
     // stasera non blocca un Superlike, e viceversa — sono limiti
     // separati, uno per tipo.
-    const alreadySentThisEvening = await db.query(`
+    const alreadySentThisEvening = await db.query(
+      `
       SELECT 1 FROM interactions
       WHERE sender_id = $1 AND receiver_id = $2 AND arena_session_id = $3 AND type = $4
-    `, [senderId, receiverId, arenaSessionId, type]);
+    `,
+      [senderId, receiverId, arenaSessionId, type]
+    );
     if (alreadySentThisEvening) {
-      return { success: false, reason: type === 'like' ? 'like_already_sent_tonight' : 'superlike_already_sent_tonight' };
+      return {
+        success: false,
+        reason: type === 'like' ? 'like_already_sent_tonight' : 'superlike_already_sent_tonight',
+      };
     }
   }
 
@@ -117,38 +130,54 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type, via
   // controllo vedrebbe sempre "già presente" anche al primo invio.
   let receiverLocalPoints = 0;
   if (countsForPoints) {
-    const result = await awardPoints({
-      receiverId,
-      arenaSessionId,
-      source: type === 'superlike' ? 'superlike_received' : 'like_received',
-      senderId,
-      viaHistoricalBoard,
-    }, { db, io });
+    const result = await awardPoints(
+      {
+        receiverId,
+        arenaSessionId,
+        source: type === 'superlike' ? 'superlike_received' : 'like_received',
+        senderId,
+        viaHistoricalBoard,
+      },
+      { db, io }
+    );
     receiverLocalPoints = result.localPoints;
 
     // Motore Fisico Top Connector — quota dei punti appena guadagnati
     // dal destinatario riflessa al Connector della SUA squadra (se ne
     // ha una in questa Arena). No-op silenzioso se non fa parte di
     // nessuna squadra, o se l'interruttore è spento.
-    await reflectPointsToConnector({
-      memberId: receiverId, arenaSessionId, memberPointsEarned: receiverLocalPoints,
-    }, { db, io });
+    await reflectPointsToConnector(
+      {
+        memberId: receiverId,
+        arenaSessionId,
+        memberPointsEarned: receiverLocalPoints,
+      },
+      { db, io }
+    );
 
     // Motore Algoritmico Top Connector — se chi INVIA questo
     // Like/Superlike è un Top Connector in questa Arena, piazza il
     // marker di "scoperta" sul destinatario (il bonus vero, se scatta,
     // arriva più tardi dal job schedulato). No-op silenzioso se il
     // mittente non è un Connector, o se l'interruttore è spento.
-    await placeDiscoveryMarker({
-      connectorId: senderId, discoveredUserId: receiverId, arenaSessionId,
-    }, { db });
+    await placeDiscoveryMarker(
+      {
+        connectorId: senderId,
+        discoveredUserId: receiverId,
+        arenaSessionId,
+      },
+      { db }
+    );
   }
 
-  const newInteraction = await db.query(`
+  const newInteraction = await db.query(
+    `
     INSERT INTO interactions (sender_id, receiver_id, arena_session_id, type, counts_for_points)
     VALUES ($1, $2, $3, $4, $5)
     RETURNING id
-  `, [senderId, receiverId, arenaSessionId, type, countsForPoints]);
+  `,
+    [senderId, receiverId, arenaSessionId, type, countsForPoints]
+  );
 
   // GHOST MODE — se chi invia è un fantasma, questo è il momento in
   // cui si "rivela" — ma SOLO nel radar di chi riceve, mai per il
@@ -186,16 +215,26 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type, via
       // Nessun controllo di tetto qui: il saldo è già stato
       // verificato e scalato più sopra, prima ancora di scrivere
       // l'interazione — se siamo arrivati fin qui, il punto spetta.
-      await awardSenderPoints({
-        senderId, arenaSessionId, source: 'superlike_received',
-      }, { db, io });
+      await awardSenderPoints(
+        {
+          senderId,
+          arenaSessionId,
+          source: 'superlike_received',
+        },
+        { db, io }
+      );
       senderEarnedPoints = true;
     } else {
       const { underLimit, justReachedLimit } = await isUnderSenderLikeLimit(senderId, arenaSessionId, { db });
       if (underLimit) {
-        await awardSenderPoints({
-          senderId, arenaSessionId, source: 'like_received',
-        }, { db, io });
+        await awardSenderPoints(
+          {
+            senderId,
+            arenaSessionId,
+            source: 'like_received',
+          },
+          { db, io }
+        );
         senderEarnedPoints = true;
       } else if (justReachedLimit) {
         // Il primo like che supera il tetto — un avviso, una volta
@@ -232,16 +271,25 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type, via
   let reciprocalMatch = false;
   let matchConversationId = null;
   if (type === 'like') {
-    const priorReciprocalLike = await db.query(`
+    const priorReciprocalLike = await db.query(
+      `
       SELECT 1 FROM interactions
       WHERE sender_id = $1 AND receiver_id = $2 AND type = 'like'
-    `, [receiverId, senderId]);
+    `,
+      [receiverId, senderId]
+    );
 
     if (priorReciprocalLike) {
       reciprocalMatch = true;
-      const chat = await openChatConversation({
-        userAId: senderId, userBId: receiverId, arenaSessionId, unlockedVia: 'like_reciprocal',
-      }, { db, io });
+      const chat = await openChatConversation(
+        {
+          userAId: senderId,
+          userBId: receiverId,
+          arenaSessionId,
+          unlockedVia: 'like_reciprocal',
+        },
+        { db, io }
+      );
       matchConversationId = chat.conversationId;
 
       // Anti-abuso punti: un match vero blocca da qui in poi
@@ -250,8 +298,16 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type, via
       // Like all'infinito solo per farsi salire i punti a vicenda.
       await blockBothDirectionsPermanently({ userAId: senderId, userBId: receiverId }, { db });
 
-      io.to(`user_${senderId}`).emit('chat_unlocked', { withUserId: receiverId, conversationId: matchConversationId, viaReciprocalLike: true });
-      io.to(`user_${receiverId}`).emit('chat_unlocked', { withUserId: senderId, conversationId: matchConversationId, viaReciprocalLike: true });
+      io.to(`user_${senderId}`).emit('chat_unlocked', {
+        withUserId: receiverId,
+        conversationId: matchConversationId,
+        viaReciprocalLike: true,
+      });
+      io.to(`user_${receiverId}`).emit('chat_unlocked', {
+        withUserId: senderId,
+        conversationId: matchConversationId,
+        viaReciprocalLike: true,
+      });
 
       // Bonus punti a ENTRAMBI per il match — 5 punti fissi a testa,
       // nessun +30% (a differenza del Pulse+Like, qui non c'è un
@@ -263,7 +319,10 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type, via
       // "invio" non si applica in modo netto: entrambi hanno sia
       // inviato che ricevuto un Like, quindi entrambi passano da
       // awardPoints per la propria metà del match).
-      await awardPoints({ receiverId: senderId, arenaSessionId, source: 'like_match', senderId: receiverId }, { db, io });
+      await awardPoints(
+        { receiverId: senderId, arenaSessionId, source: 'like_match', senderId: receiverId },
+        { db, io }
+      );
       await awardPoints({ receiverId, arenaSessionId, source: 'like_match', senderId }, { db, io });
     }
   }
@@ -295,16 +354,22 @@ async function respondToSuperlike({ interactionId, receiverId, action }, { db, i
     // forte dei due mai deciso finora.
     const newArenaSessionId = action === 'reject' ? null : interaction.arena_session_id;
     const newReason = action === 'reject' ? 'rejection' : null;
-    await db.query(`
+    await db.query(
+      `
       INSERT INTO blocks (blocker_id, blocked_id, arena_session_id, reason) VALUES ($1, $2, $3, $4)
       ON CONFLICT (blocker_id, blocked_id) DO UPDATE SET
         arena_session_id = CASE WHEN blocks.arena_session_id IS NULL THEN NULL ELSE EXCLUDED.arena_session_id END,
         reason = CASE WHEN blocks.reason = 'rejection' THEN 'rejection' ELSE COALESCE(EXCLUDED.reason, blocks.reason) END,
         created_at = now()
-    `, [receiverId, interaction.sender_id, newArenaSessionId, newReason]);
-    await db.query(`
+    `,
+      [receiverId, interaction.sender_id, newArenaSessionId, newReason]
+    );
+    await db.query(
+      `
       UPDATE interactions SET status = $1 WHERE id = $2
-    `, [action === 'reject' ? 'rejected' : 'ignored', interactionId]);
+    `,
+      [action === 'reject' ? 'rejected' : 'ignored', interactionId]
+    );
 
     // Nessun rimborso (25/8, decisione esplicita dell'utente, ripensata
     // rispetto alla correzione del 22/8): il Superlike segue ora lo
@@ -321,10 +386,15 @@ async function respondToSuperlike({ interactionId, receiverId, action }, { db, i
   if (action === 'accept') {
     await db.query(`UPDATE interactions SET status = 'matched' WHERE id = $1`, [interactionId]);
 
-    const chat = await openChatConversation({
-      userAId: interaction.sender_id, userBId: receiverId,
-      arenaSessionId: interaction.arena_session_id, unlockedVia: 'superlike',
-    }, { db, io });
+    const chat = await openChatConversation(
+      {
+        userAId: interaction.sender_id,
+        userBId: receiverId,
+        arenaSessionId: interaction.arena_session_id,
+        unlockedVia: 'superlike',
+      },
+      { db, io }
+    );
 
     // Anti-abuso punti: stesso principio del Like reciproco — un
     // Superlike accettato è un "sì" vero, non deve poter essere
@@ -332,10 +402,12 @@ async function respondToSuperlike({ interactionId, receiverId, action }, { db, i
     await blockBothDirectionsPermanently({ userAId: interaction.sender_id, userBId: receiverId }, { db });
 
     io.to(`user_${interaction.sender_id}`).emit('chat_unlocked', {
-      withUserId: receiverId, conversationId: chat.conversationId,
+      withUserId: receiverId,
+      conversationId: chat.conversationId,
     });
     io.to(`user_${receiverId}`).emit('chat_unlocked', {
-      withUserId: interaction.sender_id, conversationId: chat.conversationId,
+      withUserId: interaction.sender_id,
+      conversationId: chat.conversationId,
     });
 
     return { success: true, action: 'accept', conversationId: chat.conversationId };
@@ -348,10 +420,13 @@ async function respondToSuperlike({ interactionId, receiverId, action }, { db, i
 // inviati in questa Arena generano punti a chi li manda. Conta
 // anche eventuali crediti extra acquistati (fase fintech successiva).
 async function isUnderSenderLikeLimit(senderId, arenaSessionId, { db }) {
-  const sentCount = await db.query(`
+  const sentCount = await db.query(
+    `
     SELECT COUNT(*) FROM points_ledger
     WHERE user_id = $1 AND arena_session_id = $2 AND source = 'like_received_sent'
-  `, [senderId, arenaSessionId]);
+  `,
+    [senderId, arenaSessionId]
+  );
 
   const purchasedCredits = await getPurchasedLikeCredits(senderId, arenaSessionId, { db });
   const threshold = LIKE_SENDER_FREE_LIMIT + purchasedCredits;
@@ -368,7 +443,8 @@ async function isUnderSenderLikeLimit(senderId, arenaSessionId, { db }) {
 // Placeholder per la fase fintech: qui si collegherà l'acquisto
 // reale in-app di crediti Like extra. Per ora ritorna sempre 0.
 async function getPurchasedLikeCredits(senderId, arenaSessionId, { db }) {
-  const result = await db.query(`
+  const result = await db.query(
+    `
     SELECT COALESCE(SUM((effect_config->>'credits')::int), 0) AS total
     FROM user_purchases
     JOIN iap_products ON iap_products.id = user_purchases.product_id
@@ -378,10 +454,11 @@ async function getPurchasedLikeCredits(senderId, arenaSessionId, { db }) {
         user_purchases.arena_session_id = $2
         OR iap_products.effect_config->>'scope' = 'permanent'
       )
-  `, [senderId, arenaSessionId]);
+  `,
+    [senderId, arenaSessionId]
+  );
   return result.total || 0;
 }
-
 
 /**
  * ============================================================
@@ -415,26 +492,35 @@ async function applyPurchaseEffect({ userId, productId, arenaSessionId, external
       // all'infinito se non lo usi); comprare è denaro vero, nessun
       // motivo di limitare quanti pacchetti qualcuno voglia prendere
       // in una singola serata.
-      await db.query(`
+      await db.query(
+        `
         UPDATE users SET superlike_balance = superlike_balance + $1 WHERE id = $2
-      `, [config.credits, userId]);
+      `,
+        [config.credits, userId]
+      );
       break;
 
     case 'premium_subscription':
       expiresAt = new Date(Date.now() + config.duration_days * 24 * 60 * 60 * 1000);
-      await db.query(`
+      await db.query(
+        `
         UPDATE users SET is_premium = true, premium_expires_at = $1 WHERE id = $2
-      `, [expiresAt, userId]);
+      `,
+        [expiresAt, userId]
+      );
       break;
 
     case 'verified_badge':
       if (config.requires_manual_review) {
         // Non attiviamo subito is_verified: entra in coda di
         // revisione manuale (protezione anti-finti-VIP già decisa).
-        await db.query(`
+        await db.query(
+          `
           INSERT INTO verification_requests (user_id, purchase_id, status)
           VALUES ($1, NULL, 'pending')
-        `, [userId]);
+        `,
+          [userId]
+        );
       } else {
         await db.query(`UPDATE users SET is_verified = true WHERE id = $1`, [userId]);
       }
@@ -449,23 +535,28 @@ async function applyPurchaseEffect({ userId, productId, arenaSessionId, external
       // esattamente come già succede per il riscatto stesso. Mai una
       // scadenza: restano validi finché non li usi, in qualunque
       // locale partner presente e futuro.
-      await db.query(`
+      await db.query(
+        `
         UPDATE users SET paid_pulse_credits = paid_pulse_credits + $1 WHERE id = $2
-      `, [config.credits, userId]);
+      `,
+        [config.credits, userId]
+      );
       break;
 
     default:
       return { success: false, reason: `product_type non gestito: ${product.product_type}` };
   }
 
-  await db.query(`
+  await db.query(
+    `
     INSERT INTO user_purchases (user_id, product_id, arena_session_id, external_transaction_id, expires_at)
     VALUES ($1, $2, $3, $4, $5)
-  `, [userId, productId, arenaSessionId, externalTransactionId, expiresAt]);
+  `,
+    [userId, productId, arenaSessionId, externalTransactionId, expiresAt]
+  );
 
   return { success: true, productType: product.product_type };
 }
-
 
 // ------------------------------------------------------------
 // VISITE AL PROFILO
@@ -473,40 +564,55 @@ async function applyPurchaseEffect({ userId, productId, arenaSessionId, external
 async function trackProfileView({ viewerId, viewedUserId, arenaSessionId, viaHistoricalBoard }, { db, io }) {
   if (viewerId === viewedUserId) return { success: true, skipped: true }; // non contano le proprie
 
-  const blocked = await db.query(`
+  const blocked = await db.query(
+    `
     SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2 AND (arena_session_id IS NULL OR arena_session_id = $3 OR (reason = 'ignored_cooldown' AND expires_at > now()))
-  `, [viewedUserId, viewerId, arenaSessionId]);
+  `,
+    [viewedUserId, viewerId, arenaSessionId]
+  );
   if (blocked) return { success: false, reason: 'blocked_by_viewed_user' };
 
   // Anti-abuso: una sola visita "che conta" per coppia viewer→viewed
   // per Arena — altrimenti basterebbe aprire e chiudere lo stesso
   // profilo cento volte per generare punti a raffica.
-  const alreadyCounted = await db.query(`
+  const alreadyCounted = await db.query(
+    `
     SELECT 1 FROM profile_views
     WHERE viewer_id = $1 AND viewed_user_id = $2 AND arena_session_id = $3
-  `, [viewerId, viewedUserId, arenaSessionId]);
+  `,
+    [viewerId, viewedUserId, arenaSessionId]
+  );
 
   if (alreadyCounted) return { success: true, alreadyCounted: true };
 
-  await db.query(`
+  await db.query(
+    `
     INSERT INTO profile_views (viewer_id, viewed_user_id, arena_session_id)
     VALUES ($1, $2, $3)
-  `, [viewerId, viewedUserId, arenaSessionId]);
+  `,
+    [viewerId, viewedUserId, arenaSessionId]
+  );
 
   // Il destinatario (chi viene visto) riceve sempre il suo punto —
   // ogni visita a lui è comunque un segnale genuino, nessun rischio
   // di spam dal SUO lato.
-  await awardPoints({ receiverId: viewedUserId, arenaSessionId, source: 'profile_view', viaHistoricalBoard }, { db, io });
+  await awardPoints(
+    { receiverId: viewedUserId, arenaSessionId, source: 'profile_view', viaHistoricalBoard },
+    { db, io }
+  );
 
   // Il VISITATORE invece riceve il proprio piccolo incentivo solo
   // per le prime N persone DIVERSE viste in questa sessione — oltre
   // quel tetto, può continuare a guardare profili liberamente, ma
   // senza più guadagnare punti lui stesso (altrimenti basterebbe
   // scorrere il radar all'infinito per punti gratis).
-  const distinctViewsCount = await db.query(`
+  const distinctViewsCount = await db.query(
+    `
     SELECT COUNT(DISTINCT viewed_user_id) AS total FROM profile_views
     WHERE viewer_id = $1 AND arena_session_id = $2
-  `, [viewerId, arenaSessionId]);
+  `,
+    [viewerId, arenaSessionId]
+  );
 
   if (parseInt(distinctViewsCount.total) <= MAX_DISTINCT_VIEWS_PER_SESSION) {
     await awardSenderPoints({ senderId: viewerId, arenaSessionId, source: 'profile_view' }, { db, io });
@@ -523,15 +629,21 @@ async function trackProfileView({ viewerId, viewedUserId, arenaSessionId, viaHis
 // +Like, che restano anonime e quindi non sono "un contatto" da
 // filtrare).
 async function canSendDirectContact({ senderId, receiverId }, { db }) {
-  const receiver = await db.query(`
+  const receiver = await db.query(
+    `
     SELECT contact_filter FROM users WHERE id = $1
-  `, [receiverId]);
+  `,
+    [receiverId]
+  );
 
   if (receiver.contact_filter === 'everyone') return { allowed: true };
 
-  const sender = await db.query(`
+  const sender = await db.query(
+    `
     SELECT is_verified, is_premium FROM users WHERE id = $1
-  `, [senderId]);
+  `,
+    [senderId]
+  );
 
   if (receiver.contact_filter === 'verified_only' && !sender.is_verified) {
     return { allowed: false, reason: 'receiver_requires_verified' };
@@ -542,7 +654,6 @@ async function canSendDirectContact({ senderId, receiverId }, { db }) {
   return { allowed: true };
 }
 
-
 // ------------------------------------------------------------
 // PARTE 1b — Creazione VERA della Pulse nel database. Volutamente
 // separata dall'invio: questa funzione presuppone che il pagamento
@@ -551,8 +662,10 @@ async function canSendDirectContact({ senderId, receiverId }, { db }) {
 // Chiamata da initiatePulsePurchase (per il caso gratis/test, subito)
 // e dal webhook Stripe (per il caso pagato, solo a conferma avvenuta).
 // ------------------------------------------------------------
-async function createPulseRecord({ senderId, receiverId, arenaSessionId, drinkName, priceCents, tier, paymentStatus, stripeCheckoutSessionId }, { db, redis, io }) {
-
+async function createPulseRecord(
+  { senderId, receiverId, arenaSessionId, drinkName, priceCents, tier, paymentStatus, stripeCheckoutSessionId },
+  { db, redis, io }
+) {
   // Il Superlike allegato si scala SOLO qui — il momento vero in cui
   // la Pulse nasce per davvero, indipendentemente da quale dei
   // percorsi di pagamento l'ha portata fin qui (test/gratis/
@@ -567,12 +680,25 @@ async function createPulseRecord({ senderId, receiverId, arenaSessionId, drinkNa
     guessesRemaining = await computeGuessAllowance(arenaSessionId, { redis });
   }
 
-  const pulse = await db.query(`
+  const pulse = await db.query(
+    `
     INSERT INTO pulses (sender_id, receiver_id, arena_session_id, drink_type,
                         price_cents, tier, guesses_remaining, payment_status, stripe_checkout_session_id)
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
     RETURNING id
-  `, [senderId, receiverId, arenaSessionId, drinkName, priceCents, tier, guessesRemaining, paymentStatus, stripeCheckoutSessionId || null]);
+  `,
+    [
+      senderId,
+      receiverId,
+      arenaSessionId,
+      drinkName,
+      priceCents,
+      tier,
+      guessesRemaining,
+      paymentStatus,
+      stripeCheckoutSessionId || null,
+    ]
+  );
 
   // GHOST MODE — stessa regola di Like/Superlike: se il mittente è
   // un fantasma, si rivela SOLO nel radar di chi riceve la Pulse,
@@ -599,21 +725,37 @@ async function createPulseRecord({ senderId, receiverId, arenaSessionId, drinkNa
   // dell'utente: i punti misurano quanto sei notato, non quante
   // interazioni accetti, ed evita ogni pressione sottile ad
   // accettare "solo per convenienza".
-  const pulseAwardResult = await awardPoints({
-    receiverId, arenaSessionId, source: `pulse_${tier}`, senderId,
-  }, { db, io });
+  const pulseAwardResult = await awardPoints(
+    {
+      receiverId,
+      arenaSessionId,
+      source: `pulse_${tier}`,
+      senderId,
+    },
+    { db, io }
+  );
 
   // Stesso identico principio di sendInteraction qui sopra — Motore
   // Fisico (riflesso al Connector della squadra del destinatario) e
   // Motore Algoritmico (marker di scoperta, se chi manda la Pulse è
   // lui stesso un Top Connector) applicati anche qui, non solo per
   // Like/Superlike.
-  await reflectPointsToConnector({
-    memberId: receiverId, arenaSessionId, memberPointsEarned: pulseAwardResult.localPoints,
-  }, { db, io });
-  await placeDiscoveryMarker({
-    connectorId: senderId, discoveredUserId: receiverId, arenaSessionId,
-  }, { db });
+  await reflectPointsToConnector(
+    {
+      memberId: receiverId,
+      arenaSessionId,
+      memberPointsEarned: pulseAwardResult.localPoints,
+    },
+    { db, io }
+  );
+  await placeDiscoveryMarker(
+    {
+      connectorId: senderId,
+      discoveredUserId: receiverId,
+      arenaSessionId,
+    },
+    { db }
+  );
 
   // Notifica privata in tempo reale SOLO al destinatario — mai alla
   // stanza dell'Arena intera, questo è un evento personale.
@@ -654,18 +796,16 @@ async function getSenderProfile(senderId, { db }) {
 async function computeGuessAllowance(arenaSessionId, { redis }) {
   const arenaSize = await redis.scard(`arena:${arenaSessionId}:radar`);
 
-  if (arenaSize <= 15)  return 1;   // Arena piccola: massima tensione, stile Happn
-  if (arenaSize <= 50)  return 2;
+  if (arenaSize <= 15) return 1; // Arena piccola: massima tensione, stile Happn
+  if (arenaSize <= 50) return 2;
   if (arenaSize <= 100) return 3;
-  return 4;                         // Arena molto grande: mai oltre 4, anche se enorme
+  return 4; // Arena molto grande: mai oltre 4, anche se enorme
 }
-
 
 // ------------------------------------------------------------
 // PARTE 2 — Risposta a una Pulse: accetta / rifiuta / ignora
 // ------------------------------------------------------------
 async function respondToPulse({ pulseId, receiverId, action }, { db, io }) {
-
   const pulse = await db.query(`SELECT * FROM pulses WHERE id = $1`, [pulseId]);
   if (!pulse || pulse.receiver_id !== receiverId) {
     return { success: false, reason: 'not_found_or_not_yours' };
@@ -686,18 +826,24 @@ async function respondToPulse({ pulseId, receiverId, action }, { db, io }) {
     // indietro, qualunque cosa arrivi dopo.
     const newArenaSessionId = action === 'reject' ? null : pulse.arena_session_id;
     const newReason = action === 'reject' ? 'rejection' : null;
-    await db.query(`
+    await db.query(
+      `
       INSERT INTO blocks (blocker_id, blocked_id, arena_session_id, reason)
       VALUES ($1, $2, $3, $4)
       ON CONFLICT (blocker_id, blocked_id) DO UPDATE SET
         arena_session_id = CASE WHEN blocks.arena_session_id IS NULL THEN NULL ELSE EXCLUDED.arena_session_id END,
         reason = CASE WHEN blocks.reason = 'rejection' THEN 'rejection' ELSE COALESCE(EXCLUDED.reason, blocks.reason) END,
         created_at = now()
-    `, [receiverId, pulse.sender_id, newArenaSessionId, newReason]);
+    `,
+      [receiverId, pulse.sender_id, newArenaSessionId, newReason]
+    );
 
-    await db.query(`
+    await db.query(
+      `
       UPDATE pulses SET status = $1 WHERE id = $2
-    `, [action === 'reject' ? 'rejected' : 'ignored', pulseId]);
+    `,
+      [action === 'reject' ? 'rejected' : 'ignored', pulseId]
+    );
 
     // Rimborso SOLO per il rifiuto esplicito — è una decisione chiara
     // e definitiva, nessun motivo di aspettare. Per "ignora" invece
@@ -724,13 +870,16 @@ async function respondToPulse({ pulseId, receiverId, action }, { db, io }) {
     // (25/8) — l'unica differenza tra i due è a monte, nell'invio
     // (nessun legame col saldo Superlike).
     const opensChatOnAccept = pulse.tier === 'super' || pulse.tier === 'simple';
-    await db.query(`
+    await db.query(
+      `
       UPDATE pulses
       SET status = 'accepted',
           chat_unlocked = $1,
           redeem_code = $2
       WHERE id = $3
-    `, [opensChatOnAccept, redeemCode, pulseId]);
+    `,
+      [opensChatOnAccept, redeemCode, pulseId]
+    );
 
     // Anti-abuso punti: stesso principio già applicato a Like
     // reciproco e Superlike — accettare una Pulse (in QUALUNQUE
@@ -756,14 +905,27 @@ async function respondToPulse({ pulseId, receiverId, action }, { db, io }) {
     // condivisa dell'Arena.
     let chatConversationId = null;
     if (opensChatOnAccept) {
-      const chat = await openChatConversation({
-        userAId: pulse.sender_id, userBId: receiverId,
-        arenaSessionId: pulse.arena_session_id, unlockedVia: `pulse_${pulse.tier}`,
-      }, { db, io });
+      const chat = await openChatConversation(
+        {
+          userAId: pulse.sender_id,
+          userBId: receiverId,
+          arenaSessionId: pulse.arena_session_id,
+          unlockedVia: `pulse_${pulse.tier}`,
+        },
+        { db, io }
+      );
       chatConversationId = chat.conversationId;
 
-      io.to(`user_${pulse.sender_id}`).emit('chat_unlocked', { pulseId, withUserId: receiverId, conversationId: chatConversationId });
-      io.to(`user_${receiverId}`).emit('chat_unlocked', { pulseId, withUserId: pulse.sender_id, conversationId: chatConversationId });
+      io.to(`user_${pulse.sender_id}`).emit('chat_unlocked', {
+        pulseId,
+        withUserId: receiverId,
+        conversationId: chatConversationId,
+      });
+      io.to(`user_${receiverId}`).emit('chat_unlocked', {
+        pulseId,
+        withUserId: pulse.sender_id,
+        conversationId: chatConversationId,
+      });
     }
 
     return {
@@ -772,7 +934,7 @@ async function respondToPulse({ pulseId, receiverId, action }, { db, io }) {
       chatUnlocked: opensChatOnAccept,
       conversationId: chatConversationId,
       redeemCode,
-      canStillPlayGuessGame: pulse.tier === 'like',   // il frontend sa se offrire il minigioco dopo
+      canStillPlayGuessGame: pulse.tier === 'like', // il frontend sa se offrire il minigioco dopo
     };
   }
 
@@ -787,7 +949,6 @@ async function respondToPulse({ pulseId, receiverId, action }, { db, io }) {
 // possesso della consumazione — decide solo se si sblocca la chat.
 // Chi perde tutti i tentativi tiene comunque la Pulse già sua.
 async function attemptGuess({ pulseId, receiverId, guessedUserId }, { db, io }) {
-
   const pulse = await db.query(`SELECT * FROM pulses WHERE id = $1`, [pulseId]);
   if (!pulse || pulse.receiver_id !== receiverId || pulse.tier !== 'like') {
     return { success: false, reason: 'invalid_request' };
@@ -804,10 +965,13 @@ async function attemptGuess({ pulseId, receiverId, guessedUserId }, { db, io }) 
 
   const isCorrect = guessedUserId === pulse.sender_id;
 
-  await db.query(`
+  await db.query(
+    `
     INSERT INTO pulse_guess_attempts (pulse_id, guessed_user_id, was_correct)
     VALUES ($1, $2, $3)
-  `, [pulseId, guessedUserId, isCorrect]);
+  `,
+    [pulseId, guessedUserId, isCorrect]
+  );
 
   // Ogni tentativo SBAGLIATO equivale a un vero Like inviato a quella
   // persona — non è solo un tentativo "interno" al minigioco: chi
@@ -819,12 +983,15 @@ async function attemptGuess({ pulseId, receiverId, guessedUserId }, { db, io }) 
   // (Il tentativo corretto invece porta già dritto alla chat, non
   // serve passare anche dal Like: l'identità è già del tutto svelata.)
   if (!isCorrect) {
-    await sendInteraction({
-      senderId: receiverId,
-      receiverId: guessedUserId,
-      arenaSessionId: pulse.arena_session_id,
-      type: 'like',
-    }, { db, io });
+    await sendInteraction(
+      {
+        senderId: receiverId,
+        receiverId: guessedUserId,
+        arenaSessionId: pulse.arena_session_id,
+        type: 'like',
+      },
+      { db, io }
+    );
   }
 
   if (isCorrect) {
@@ -833,13 +1000,28 @@ async function attemptGuess({ pulseId, receiverId, guessedUserId }, { db, io }) 
     // Match riuscito: creiamo davvero la conversazione, poi
     // avvisiamo entrambe le parti in privato — è il momento "wow"
     // del minigioco.
-    const chat = await openChatConversation({
-      userAId: pulse.sender_id, userBId: receiverId,
-      arenaSessionId: pulse.arena_session_id, unlockedVia: 'pulse_like_match',
-    }, { db, io });
+    const chat = await openChatConversation(
+      {
+        userAId: pulse.sender_id,
+        userBId: receiverId,
+        arenaSessionId: pulse.arena_session_id,
+        unlockedVia: 'pulse_like_match',
+      },
+      { db, io }
+    );
 
-    io.to(`user_${pulse.sender_id}`).emit('chat_unlocked', { pulseId, withUserId: receiverId, viaGuessGame: true, conversationId: chat.conversationId });
-    io.to(`user_${receiverId}`).emit('chat_unlocked', { pulseId, withUserId: pulse.sender_id, viaGuessGame: true, conversationId: chat.conversationId });
+    io.to(`user_${pulse.sender_id}`).emit('chat_unlocked', {
+      pulseId,
+      withUserId: receiverId,
+      viaGuessGame: true,
+      conversationId: chat.conversationId,
+    });
+    io.to(`user_${receiverId}`).emit('chat_unlocked', {
+      pulseId,
+      withUserId: pulse.sender_id,
+      viaGuessGame: true,
+      conversationId: chat.conversationId,
+    });
 
     // Bonus punti per un match riuscito — ora a ENTRAMBI (prima solo
     // al ricevente), passando dal vero motore dei moltiplicatori
@@ -850,12 +1032,23 @@ async function attemptGuess({ pulseId, receiverId, guessedUserId }, { db, io }) 
     // awardPoints/awardSenderPoints emettono già da soli l'evento
     // 'points_update' verso l'Arena — nessun broadcast manuale
     // aggiuntivo necessario qui.
-    const matchResult = await awardPoints({
-      receiverId, arenaSessionId: pulse.arena_session_id, source: 'pulse_like_match', senderId: pulse.sender_id,
-    }, { db, io });
-    await awardSenderPoints({
-      senderId: pulse.sender_id, arenaSessionId: pulse.arena_session_id, source: 'pulse_like_match',
-    }, { db, io });
+    const matchResult = await awardPoints(
+      {
+        receiverId,
+        arenaSessionId: pulse.arena_session_id,
+        source: 'pulse_like_match',
+        senderId: pulse.sender_id,
+      },
+      { db, io }
+    );
+    await awardSenderPoints(
+      {
+        senderId: pulse.sender_id,
+        arenaSessionId: pulse.arena_session_id,
+        source: 'pulse_like_match',
+      },
+      { db, io }
+    );
 
     return { success: true, matched: true, chatUnlocked: true, bonusPoints: matchResult.localPoints };
   }
@@ -873,7 +1066,6 @@ async function attemptGuess({ pulseId, receiverId, guessedUserId }, { db, io }) 
   return { success: true, matched: false, attemptsRemaining: remaining };
 }
 
-
 function generateRedeemCode() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
@@ -886,7 +1078,8 @@ function generateRedeemCode() {
  * Pulse standalone/+like ancora "misteriosa".
  */
 async function getReceivedPulses({ userId }, { db }) {
-  const pulses = await db.queryAll(`
+  const pulses = await db.queryAll(
+    `
     SELECT r.id, r.drink_type, r.tier, r.status, r.chat_unlocked, r.created_at, r.redeem_code,
            v.id AS venue_id, v.name AS venue_name,
            CASE WHEN r.tier IN ('super', 'simple') OR r.chat_unlocked THEN u.display_name ELSE NULL END AS sender_name,
@@ -906,7 +1099,9 @@ async function getReceivedPulses({ userId }, { db }) {
         WHERE d.user_id = $1 AND d.entry_key = 'pulse_view-' || r.id::text
       )
     ORDER BY r.created_at DESC
-  `, [userId]);
+  `,
+    [userId]
+  );
 
   return pulses.map((r) => ({
     pulseId: r.id,
@@ -938,7 +1133,8 @@ async function getReceivedPulses({ userId }, { db }) {
  * mai chi ha inviato.
  */
 async function getSentPulses({ userId }, { db }) {
-  const pulses = await db.queryAll(`
+  const pulses = await db.queryAll(
+    `
     SELECT r.id, r.drink_type, r.tier, r.status, r.created_at,
            v.name AS venue_name,
            u.display_name AS receiver_name
@@ -956,7 +1152,9 @@ async function getSentPulses({ userId }, { db }) {
         WHERE d.user_id = $1 AND d.entry_key = 'pulse_view-' || r.id::text
       )
     ORDER BY r.created_at DESC
-  `, [userId]);
+  `,
+    [userId]
+  );
 
   return pulses.map((r) => ({
     pulseId: r.id,
@@ -977,11 +1175,14 @@ async function getSentPulses({ userId }, { db }) {
  * l'altra. Mai la riga vera sottostante, solo nascosta qui.
  */
 async function dismissPulseView({ userId, pulseId }, { db }) {
-  await db.query(`
+  await db.query(
+    `
     INSERT INTO dismissed_notifications (user_id, entry_key)
     VALUES ($1, $2)
     ON CONFLICT (user_id, entry_key) DO NOTHING
-  `, [userId, `pulse_view-${pulseId}`]);
+  `,
+    [userId, `pulse_view-${pulseId}`]
+  );
   return { success: true };
 }
 
@@ -1043,7 +1244,8 @@ async function blockBothDirectionsPermanently({ userAId, userBId, reason = 'matc
   // blocco manuale dalla chat vince su un semplice match (nato solo
   // per impedire la ripetizione di punti, non un vero "non voglio
   // più vederti").
-  await db.query(`
+  await db.query(
+    `
     INSERT INTO blocks (blocker_id, blocked_id, arena_session_id, reason) VALUES ($1, $2, NULL, $3)
     ON CONFLICT (blocker_id, blocked_id) DO UPDATE SET
       arena_session_id = NULL,
@@ -1053,8 +1255,11 @@ async function blockBothDirectionsPermanently({ userAId, userBId, reason = 'matc
         ELSE $3
       END,
       created_at = now()
-  `, [userAId, userBId, reason]);
-  await db.query(`
+  `,
+    [userAId, userBId, reason]
+  );
+  await db.query(
+    `
     INSERT INTO blocks (blocker_id, blocked_id, arena_session_id, reason) VALUES ($1, $2, NULL, $3)
     ON CONFLICT (blocker_id, blocked_id) DO UPDATE SET
       arena_session_id = NULL,
@@ -1064,7 +1269,9 @@ async function blockBothDirectionsPermanently({ userAId, userBId, reason = 'matc
         ELSE $3
       END,
       created_at = now()
-  `, [userBId, userAId, reason]);
+  `,
+    [userBId, userAId, reason]
+  );
 }
 
 async function refundPulseCredit({ userId }, { db }) {
@@ -1089,10 +1296,13 @@ async function refundPulseCredit({ userId }, { db }) {
  * ============================================================
  */
 async function refundAbandonedPulsesForSession(arenaSessionId, { db }) {
-  const abandoned = await db.queryAll(`
+  const abandoned = await db.queryAll(
+    `
     SELECT id, sender_id, receiver_id FROM pulses
     WHERE arena_session_id = $1 AND status IN ('pending', 'ignored')
-  `, [arenaSessionId]);
+  `,
+    [arenaSessionId]
+  );
 
   for (const p of abandoned) {
     await refundPulseCredit({ userId: p.sender_id }, { db });
@@ -1100,36 +1310,46 @@ async function refundAbandonedPulsesForSession(arenaSessionId, { db }) {
   }
 
   if (abandoned.length > 0) {
-    await db.query(`
+    await db.query(
+      `
       UPDATE pulses SET status = 'expired'
       WHERE id = ANY($1)
-    `, [abandoned.map((p) => p.id)]);
+    `,
+      [abandoned.map((p) => p.id)]
+    );
   }
 
   // Un Superlike mai deciso, a fine serata — passa a "scaduto" per
   // lo storico, ma dal 25/8 il credito non torna più indietro (v.
   // spiegazione completa in populive-checkin-logic.js, STEP 2.5).
-  const abandonedSuperlikes = await db.queryAll(`
+  const abandonedSuperlikes = await db.queryAll(
+    `
     SELECT id, sender_id, receiver_id FROM interactions
     WHERE arena_session_id = $1 AND type = 'superlike' AND status IN ('sent', 'ignored')
-  `, [arenaSessionId]);
+  `,
+    [arenaSessionId]
+  );
 
   for (const i of abandonedSuperlikes) {
     await createIgnoredCooldownBlock({ ignoredUserId: i.sender_id, ignorerUserId: i.receiver_id }, { db });
   }
 
   if (abandonedSuperlikes.length > 0) {
-    await db.query(`
+    await db.query(
+      `
       UPDATE interactions SET status = 'expired'
       WHERE id = ANY($1)
-    `, [abandonedSuperlikes.map((i) => i.id)]);
+    `,
+      [abandonedSuperlikes.map((i) => i.id)]
+    );
   }
 
   // Stesso raffreddamento esteso al Like semplice a fine serata
   // (26/8) — stessa identica logica dello STEP 2.5 in
   // populive-checkin-logic.js, qui applicata quando è la SERATA a
   // finire, non il destinatario a cambiare locale.
-  const abandonedLikes = await db.queryAll(`
+  const abandonedLikes = await db.queryAll(
+    `
     SELECT i.id, i.sender_id, i.receiver_id
     FROM interactions i
     WHERE i.arena_session_id = $1 AND i.type = 'like' AND i.status = 'sent'
@@ -1137,7 +1357,9 @@ async function refundAbandonedPulsesForSession(arenaSessionId, { db }) {
         SELECT 1 FROM interactions r
         WHERE r.sender_id = i.receiver_id AND r.receiver_id = i.sender_id AND r.type = 'like'
       )
-  `, [arenaSessionId]);
+  `,
+    [arenaSessionId]
+  );
 
   for (const i of abandonedLikes) {
     await createIgnoredCooldownBlock({ ignoredUserId: i.sender_id, ignorerUserId: i.receiver_id }, { db });
@@ -1175,7 +1397,8 @@ async function refundAbandonedPulsesForSession(arenaSessionId, { db }) {
  * ============================================================
  */
 async function getPendingReceivedInteractions({ userId }, { db }) {
-  const rows = await db.queryAll(`
+  const rows = await db.queryAll(
+    `
     (
       SELECT i.id::text AS id, 'like' AS kind, i.created_at, v.name AS venue_name,
              NULL AS drink_type, NULL AS sender_id, NULL AS sender_name, NULL AS sender_photo
@@ -1213,7 +1436,9 @@ async function getPendingReceivedInteractions({ userId }, { db }) {
     )
     ORDER BY created_at DESC
     LIMIT 100
-  `, [userId]);
+  `,
+    [userId]
+  );
 
   return rows.map((r) => ({
     id: r.id,
@@ -1238,7 +1463,8 @@ async function getPendingReceivedInteractions({ userId }, { db }) {
  * ============================================================
  */
 async function getSentInteractionsHistory({ userId }, { db }) {
-  const rows = await db.queryAll(`
+  const rows = await db.queryAll(
+    `
     (
       SELECT i.id::text AS id, i.type AS kind, i.status, i.created_at,
              v.name AS venue_name, NULL AS drink_type,
@@ -1262,7 +1488,9 @@ async function getSentInteractionsHistory({ userId }, { db }) {
     )
     ORDER BY created_at DESC
     LIMIT 150
-  `, [userId]);
+  `,
+    [userId]
+  );
 
   return rows.map((r) => ({
     id: r.id,
@@ -1283,14 +1511,17 @@ async function getSentInteractionsHistory({ userId }, { db }) {
  * (che ora riguarda solo il Centro Notifiche ripensato).
  */
 async function getUnseenLikeCenterCount({ userId }, { db }) {
-  const row = await db.query(`
+  const row = await db.query(
+    `
     SELECT COUNT(*) AS total FROM (
       (SELECT id, created_at FROM interactions WHERE type IN ('like', 'superlike') AND receiver_id = $1)
       UNION ALL
       (SELECT id, created_at FROM pulses WHERE receiver_id = $1)
     ) combined
     WHERE created_at > (SELECT like_center_last_seen_at FROM users WHERE id = $1)
-  `, [userId]);
+  `,
+    [userId]
+  );
   return parseInt(row?.total) || 0;
 }
 
@@ -1320,7 +1551,8 @@ async function markLikeCenterSeen({ userId }, { db }) {
  * ============================================================
  */
 async function createIgnoredCooldownBlock({ ignoredUserId, ignorerUserId }, { db }) {
-  await db.query(`
+  await db.query(
+    `
     INSERT INTO blocks (blocker_id, blocked_id, reason, expires_at, arena_session_id)
     VALUES ($1, $2, 'ignored_cooldown', now() + interval '14 days', NULL)
     ON CONFLICT (blocker_id, blocked_id) DO UPDATE SET
@@ -1340,14 +1572,19 @@ async function createIgnoredCooldownBlock({ ignoredUserId, ignorerUserId }, { db
         WHEN blocks.reason IN ('rejection', 'user_blocked') THEN blocks.created_at
         ELSE now()
       END
-  `, [ignorerUserId, ignoredUserId]);
+  `,
+    [ignorerUserId, ignoredUserId]
+  );
 }
 
 async function getPermanentlyBlockedPairUserIds({ userId }, { db }) {
-  const rows = await db.queryAll(`
+  const rows = await db.queryAll(
+    `
     SELECT blocker_id, blocked_id FROM blocks
     WHERE (blocker_id = $1 OR blocked_id = $1) AND arena_session_id IS NULL AND reason IN ('rejection', 'user_blocked')
-  `, [userId]);
+  `,
+    [userId]
+  );
   return [...new Set(rows.map((r) => (r.blocker_id === userId ? r.blocked_id : r.blocker_id)))];
 }
 
@@ -1397,9 +1634,12 @@ async function blockUserFromChat({ conversationId, blockerId }, { db, io }) {
  * ma anche il totale utilizzabile subito.
  */
 async function getPulseBalance({ userId }, { db }) {
-  const user = await db.query(`
+  const user = await db.query(
+    `
     SELECT free_pulses_balance, paid_pulse_credits FROM users WHERE id = $1
-  `, [userId]);
+  `,
+    [userId]
+  );
   if (!user) return { success: false, reason: 'user_not_found' };
 
   return {
@@ -1430,7 +1670,8 @@ async function getPulseBalance({ userId }, { db }) {
  * ============================================================
  */
 async function getInteractionHistory({ userId }, { db }) {
-  const rows = await db.queryAll(`
+  const rows = await db.queryAll(
+    `
     WITH combined AS (
       (
         -- Superlike ricevuti, ma solo quelli ORMAI decisi — quelli
@@ -1482,7 +1723,9 @@ async function getInteractionHistory({ userId }, { db }) {
     )
     ORDER BY created_at DESC
     LIMIT 150
-  `, [userId]);
+  `,
+    [userId]
+  );
 
   // Chi va svelato: i match (svelano già l'identità a entrambi per
   // definizione) e i Superlike/Pulse+Superlike/Pulse semplice
@@ -1505,10 +1748,15 @@ async function getInteractionHistory({ userId }, { db }) {
   const idsToFetch = [...new Set(revealed.filter((r) => r.reveal).map((r) => r.other_user_id))];
   const profiles = {};
   if (idsToFetch.length > 0) {
-    const profileRows = await db.queryAll(`
+    const profileRows = await db.queryAll(
+      `
       SELECT id, display_name, photo_url FROM users WHERE id = ANY($1)
-    `, [idsToFetch]);
-    profileRows.forEach((p) => { profiles[p.id] = { userId: p.id, displayName: p.display_name, photoUrl: p.photo_url }; });
+    `,
+      [idsToFetch]
+    );
+    profileRows.forEach((p) => {
+      profiles[p.id] = { userId: p.id, displayName: p.display_name, photoUrl: p.photo_url };
+    });
   }
 
   // Per ogni match Like+Like: dov'è la conversazione vera (se
@@ -1522,13 +1770,16 @@ async function getInteractionHistory({ userId }, { db }) {
   const chatInfoByOtherUser = {};
   if (matchEntries.length > 0) {
     const otherIds = matchEntries.map((r) => r.other_user_id);
-    const convRows = await db.queryAll(`
+    const convRows = await db.queryAll(
+      `
       SELECT id, user_a_id, user_b_id, user_a_last_read_at, user_b_last_read_at,
              EXISTS(SELECT 1 FROM chat_messages m WHERE m.conversation_id = chat_conversations.id) AS has_messages
       FROM chat_conversations
       WHERE (user_a_id = $1 AND user_b_id = ANY($2)) OR (user_b_id = $1 AND user_a_id = ANY($2))
       ORDER BY created_at DESC
-    `, [userId, otherIds]);
+    `,
+      [userId, otherIds]
+    );
     convRows.forEach((c) => {
       const otherId = c.user_a_id === userId ? c.user_b_id : c.user_a_id;
       if (chatInfoByOtherUser[otherId]) return; // già trovata una più recente, teniamo quella
@@ -1549,10 +1800,10 @@ async function getInteractionHistory({ userId }, { db }) {
       direction: r.direction, // 'sent' | 'received' | 'match'
       createdAt: r.created_at,
       drinkType: r.drink_type,
-      otherPerson: r.reveal ? (profiles[r.other_user_id] || null) : null,
+      otherPerson: r.reveal ? profiles[r.other_user_id] || null : null,
       // Solo per 'like_match' non ancora avanzato — dove aprire la
       // chat quando la persona tocca la notifica.
-      conversationId: r.kind === 'like_match' ? (chatInfoByOtherUser[r.other_user_id]?.conversationId || null) : null,
+      conversationId: r.kind === 'like_match' ? chatInfoByOtherUser[r.other_user_id]?.conversationId || null : null,
     }));
 }
 
@@ -1565,14 +1816,17 @@ async function getInteractionHistory({ userId }, { db }) {
  * concetto diverso).
  */
 async function getUnseenNotificationCount({ userId }, { db }) {
-  const row = await db.query(`
+  const row = await db.query(
+    `
     SELECT COUNT(*) AS total FROM (
       (SELECT id, created_at FROM interactions WHERE receiver_id = $1)
       UNION ALL
       (SELECT id, created_at FROM pulses WHERE receiver_id = $1)
     ) combined
     WHERE created_at > (SELECT notifications_last_seen_at FROM users WHERE id = $1)
-  `, [userId]);
+  `,
+    [userId]
+  );
   return parseInt(row?.total) || 0;
 }
 
@@ -1587,11 +1841,14 @@ async function markNotificationsSeen({ userId }, { db }) {
  * persona" in una tabella leggera a sé.
  */
 async function dismissNotification({ userId, kind, entryId }, { db }) {
-  await db.query(`
+  await db.query(
+    `
     INSERT INTO dismissed_notifications (user_id, entry_key)
     VALUES ($1, $2)
     ON CONFLICT (user_id, entry_key) DO NOTHING
-  `, [userId, `${kind}-${entryId}`]);
+  `,
+    [userId, `${kind}-${entryId}`]
+  );
   return { success: true };
 }
 
@@ -1606,4 +1863,32 @@ async function clearAllNotifications({ userId }, { db }) {
   return { success: true };
 }
 
-module.exports = { canSendDirectContact, sendInteraction, trackProfileView, createPulseRecord, respondToPulse, attemptGuess, applyPurchaseEffect, respondToSuperlike, getReceivedPulses, getSentPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews, refundPulseCredit, refundAbandonedPulsesForSession, getPermanentlyBlockedPairUserIds, blockUserFromChat, getPendingReceivedInteractions, getSentInteractionsHistory, getUnseenLikeCenterCount, markLikeCenterSeen, createIgnoredCooldownBlock };
+module.exports = {
+  canSendDirectContact,
+  sendInteraction,
+  trackProfileView,
+  createPulseRecord,
+  respondToPulse,
+  attemptGuess,
+  applyPurchaseEffect,
+  respondToSuperlike,
+  getReceivedPulses,
+  getSentPulses,
+  getPulseBalance,
+  getInteractionHistory,
+  getUnseenNotificationCount,
+  markNotificationsSeen,
+  dismissNotification,
+  clearAllNotifications,
+  dismissPulseView,
+  clearAllPulseViews,
+  refundPulseCredit,
+  refundAbandonedPulsesForSession,
+  getPermanentlyBlockedPairUserIds,
+  blockUserFromChat,
+  getPendingReceivedInteractions,
+  getSentInteractionsHistory,
+  getUnseenLikeCenterCount,
+  markLikeCenterSeen,
+  createIgnoredCooldownBlock,
+};

@@ -1,0 +1,50 @@
+# ============================================================
+# POPULIVE — SERVIZI DI SVILUPPO LOCALE
+# ============================================================
+# Postgres + Redis in container, senza installare nulla sulla
+# macchina. Avvio:   npm run db:up      (oppure docker compose up -d)
+# Stop:              npm run db:down
+# Reset totale:      npm run db:reset   (cancella anche i dati!)
+#
+# Lo schema NON viene caricato dal container: lo applica
+#   npm run db:migrate
+# (schema base + db/migrations/*.sql in ordine, una sola volta
+# ciascuno — tiene traccia in una tabella schema_migrations).
+# ============================================================
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: populive-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: populive
+      POSTGRES_PASSWORD: populive
+      POSTGRES_DB: populive
+    ports:
+      - '5432:5432'
+    volumes:
+      - populive_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U populive -d populive']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: populive-redis
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    volumes:
+      - populive_redisdata:/data
+    command: ['redis-server', '--appendonly', 'yes']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  populive_pgdata:
+  populive_redisdata:

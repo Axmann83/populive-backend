@@ -1,0 +1,3 @@
+# Terminazioni di riga sempre LF nel repository e nella copia di lavoro,
+# indipendentemente dal sistema operativo (evita diff "tutto cambiato").
+* text=auto eol=lf

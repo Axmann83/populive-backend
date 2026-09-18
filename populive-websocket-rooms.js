@@ -13,18 +13,16 @@
 
 const { Server } = require('socket.io');
 
-function setupWebSocket(httpServer, { redis, db }) {
+function setupWebSocket(httpServer, { db }) {
   const io = new Server(httpServer, {
-    cors: { origin: '*' },  // da restringere al dominio vero in produzione
+    cors: { origin: '*' }, // da restringere al dominio vero in produzione
   });
 
   io.on('connection', (socket) => {
-
     // ------------------------------------------------------------
     // Il telefono, appena connesso, dichiara "sono nell'Arena X"
     // ------------------------------------------------------------
     socket.on('join_arena', async ({ arenaSessionId, userId }) => {
-
       // Un telefono può essere in UNA sola Arena alla volta:
       // se era già in una stanza precedente (es. ha cambiato
       // locale, o l'app si è riconnessa), lo togliamo da lì prima.
@@ -131,11 +129,14 @@ function setupWebSocket(httpServer, { redis, db }) {
       // se l'app si chiude bruscamente (batteria scarica, crash) il
       // disconnect può arrivare con qualche minuto di ritardo, non è
       // un dato al secondo — sufficiente per medie, non per singoli casi.
-      await db.query(`
+      await db.query(
+        `
         UPDATE checkins
         SET checked_out_at = now()
         WHERE user_id = $1 AND arena_session_id = $2 AND checked_out_at IS NULL
-      `, [userId, arenaSessionId]);
+      `,
+        [userId, arenaSessionId]
+      );
 
       // Avvisiamo gli altri che questa persona non è più "vivamente"
       // collegata — utile per un radar accurato (es. per non mostrare
@@ -155,8 +156,8 @@ function setupWebSocket(httpServer, { redis, db }) {
     });
 
     function leaveAllArenaRooms(socket) {
-      const rooms = [...socket.rooms].filter(r => r.startsWith('arena_'));
-      rooms.forEach(r => socket.leave(r));
+      const rooms = [...socket.rooms].filter((r) => r.startsWith('arena_'));
+      rooms.forEach((r) => socket.leave(r));
     }
   });
 
@@ -186,7 +187,6 @@ function broadcastToOthers(io, room, excludeUserId, eventName, payload) {
 }
 
 module.exports = { setupWebSocket, broadcastToOthers };
-
 
 /**
  * ============================================================

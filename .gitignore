@@ -1,0 +1,33 @@
+# Dipendenze
+node_modules/
+
+# Segreti locali (la config di sviluppo è in .env.dev, committato)
+.env
+.env.local
+.env.*.local
+.env.production
+
+# Log e output
+logs/
+*.log
+npm-debug.log*
+
+# Editor / IDE / strumenti
+.claude/
+.vscode/
+.idea/
+*.swp
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Cache e temporanei
+.cache/
+tmp/
+*.tmp
+
+# Dump del database locale
+*.sql.gz
+*.dump

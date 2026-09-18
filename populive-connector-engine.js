@@ -21,8 +21,7 @@ const SQUAD_REFLECTION_SHARE = 0.15; // quanto dei punti di un membro si riflett
 const DISCOVERY_WINDOW_HOURS = 2;
 const DISCOVERY_SURGE_THRESHOLD = 20; // punti guadagnati dal "discovered" per considerarlo un'esplosione
 const CONNECTOR_TOP_PERCENTILE = 0.05; // top 5% dell'Arena
-const SPENDER_TOP_PERCENTILE = 0.05;   // stesso principio, per la spesa al tavolo
-
+const SPENDER_TOP_PERCENTILE = 0.05; // stesso principio, per la spesa al tavolo
 
 // ------------------------------------------------------------
 // TOP SPENDER — stesso principio del Top Connector: calcolato
@@ -30,7 +29,8 @@ const SPENDER_TOP_PERCENTILE = 0.05;   // stesso principio, per la spesa al tavo
 // arrivano da 'table_spending_threshold' in QUESTA arena_session.
 // ------------------------------------------------------------
 async function recalculateTopSpenders(arenaSessionId, { db }) {
-  await db.query(`
+  await db.query(
+    `
     WITH spending_totals AS (
       SELECT user_id, SUM(points) AS spend_points
       FROM points_ledger
@@ -45,7 +45,9 @@ async function recalculateTopSpenders(arenaSessionId, { db }) {
     SELECT user_id, $1, (pct <= $2) FROM ranked
     ON CONFLICT (user_id, arena_session_id)
     DO UPDATE SET is_top_spender = EXCLUDED.is_top_spender
-  `, [arenaSessionId, SPENDER_TOP_PERCENTILE]);
+  `,
+    [arenaSessionId, SPENDER_TOP_PERCENTILE]
+  );
 }
 
 /**
@@ -62,10 +64,13 @@ async function isBigSpenderEnabled({ db }) {
 
 async function getSpenderStatus({ userId, arenaSessionId }, { db }) {
   if (!(await isBigSpenderEnabled({ db }))) return { isTopSpender: false };
-  const row = await db.query(`
+  const row = await db.query(
+    `
     SELECT is_top_spender FROM spender_status
     WHERE user_id = $1 AND arena_session_id = $2
-  `, [userId, arenaSessionId]);
+  `,
+    [userId, arenaSessionId]
+  );
   return { isTopSpender: row ? row.is_top_spender : false };
 }
 
@@ -85,7 +90,6 @@ async function isTopConnectorEnabled({ db }) {
   return flag ? flag.is_enabled : true; // se manca la riga, di default acceso (comportamento identico a oggi)
 }
 
-
 // ------------------------------------------------------------
 // A) MOTORE FISICO — Squad via QR
 // ------------------------------------------------------------
@@ -97,11 +101,14 @@ async function joinSquad({ connectorId, memberId, arenaSessionId, tableQrCode, w
   // al tavolo eredita lo stesso collegamento, senza doverlo ridecidere.
   let resolvedConnectorId = connectorId;
   if (tableQrCode && resolvedConnectorId === undefined) {
-    const existing = await db.query(`
+    const existing = await db.query(
+      `
       SELECT connector_id FROM squad_memberships
       WHERE arena_session_id = $1 AND table_qr_code = $2
       LIMIT 1
-    `, [arenaSessionId, tableQrCode]);
+    `,
+      [arenaSessionId, tableQrCode]
+    );
 
     if (existing) {
       // Tavolo già esistente: si eredita la scelta già fatta da chi
@@ -117,11 +124,14 @@ async function joinSquad({ connectorId, memberId, arenaSessionId, tableQrCode, w
     }
   }
 
-  await db.query(`
+  await db.query(
+    `
     INSERT INTO squad_memberships (connector_id, member_id, arena_session_id, table_qr_code)
     VALUES ($1, $2, $3, $4)
     ON CONFLICT (member_id, arena_session_id) DO NOTHING
-  `, [resolvedConnectorId || null, memberId, arenaSessionId, tableQrCode || null]);
+  `,
+    [resolvedConnectorId || null, memberId, arenaSessionId, tableQrCode || null]
+  );
 
   return { success: true, linkedToConnector: !!resolvedConnectorId };
 }
@@ -136,20 +146,26 @@ async function reflectPointsToConnector({ memberId, arenaSessionId, memberPoints
     return { reflected: false, reason: 'top_connector_disabled' };
   }
 
-  const membership = await db.query(`
+  const membership = await db.query(
+    `
     SELECT connector_id FROM squad_memberships
     WHERE member_id = $1 AND arena_session_id = $2
-  `, [memberId, arenaSessionId]);
+  `,
+    [memberId, arenaSessionId]
+  );
 
   if (!membership) return { reflected: false };
 
   const reflectedPoints = Math.round(memberPointsEarned * SQUAD_REFLECTION_SHARE);
   if (reflectedPoints <= 0) return { reflected: false };
 
-  await db.query(`
+  await db.query(
+    `
     INSERT INTO points_ledger (user_id, arena_session_id, points, source)
     VALUES ($1, $2, $3, 'squad_reflection')
-  `, [membership.connector_id, arenaSessionId, reflectedPoints]);
+  `,
+    [membership.connector_id, arenaSessionId, reflectedPoints]
+  );
 
   await updateContributionPoints({ userId: membership.connector_id, arenaSessionId, delta: reflectedPoints }, { db });
 
@@ -161,7 +177,6 @@ async function reflectPointsToConnector({ memberId, arenaSessionId, memberPoints
 
   return { reflected: true, reflectedPoints };
 }
-
 
 // ------------------------------------------------------------
 // B) MOTORE ALGORITMICO — scoperta predittiva
@@ -181,11 +196,14 @@ async function placeDiscoveryMarker({ connectorId, discoveredUserId, arenaSessio
 
   const currentPoints = await getLocalPoints({ userId: discoveredUserId, arenaSessionId }, { db });
 
-  await db.query(`
+  await db.query(
+    `
     INSERT INTO connector_discovery_markers
       (connector_id, discovered_user_id, arena_session_id, points_at_vote_time)
     VALUES ($1, $2, $3, $4)
-  `, [connectorId, discoveredUserId, arenaSessionId, currentPoints]);
+  `,
+    [connectorId, discoveredUserId, arenaSessionId, currentPoints]
+  );
 
   return { placed: true };
 }
@@ -199,10 +217,13 @@ async function placeDiscoveryMarker({ connectorId, discoveredUserId, arenaSessio
 async function evaluatePendingDiscoveryMarkers({ db, io }) {
   const cutoff = new Date(Date.now() - DISCOVERY_WINDOW_HOURS * 60 * 60 * 1000);
 
-  const pendingMarkers = await db.queryAll(`
+  const pendingMarkers = await db.queryAll(
+    `
     SELECT * FROM connector_discovery_markers
     WHERE evaluated_at IS NULL AND created_at <= $1
-  `, [cutoff]);
+  `,
+    [cutoff]
+  );
 
   // Letto una sola volta per l'intero giro del job, non per ogni
   // marker — se qualcuno lo riaccende A METÀ esecuzione, il giro in
@@ -212,7 +233,8 @@ async function evaluatePendingDiscoveryMarkers({ db, io }) {
 
   for (const marker of pendingMarkers) {
     const currentPoints = await getLocalPoints(
-      { userId: marker.discovered_user_id, arenaSessionId: marker.arena_session_id }, { db }
+      { userId: marker.discovered_user_id, arenaSessionId: marker.arena_session_id },
+      { db }
     );
     const surge = currentPoints - marker.points_at_vote_time;
     // Se il Top Connector è spento dalla dashboard, il marker viene
@@ -221,26 +243,31 @@ async function evaluatePendingDiscoveryMarkers({ db, io }) {
     const didSurge = topConnectorEnabled && surge >= DISCOVERY_SURGE_THRESHOLD;
 
     if (didSurge) {
-      await awardPoints({
-        receiverId: marker.connector_id,
-        arenaSessionId: marker.arena_session_id,
-        source: 'connector_discovery_bonus',
-      }, { db, io });
+      await awardPoints(
+        {
+          receiverId: marker.connector_id,
+          arenaSessionId: marker.arena_session_id,
+          source: 'connector_discovery_bonus',
+        },
+        { db, io }
+      );
       // NOTA: awardPoints usa BASE_POINTS per source — per un valore
       // dedicato, aggiungere la relativa voce a BASE_POINTS nel
       // motore punti invece di duplicare qui la scrittura sul ledger.
     }
 
-    await db.query(`
+    await db.query(
+      `
       UPDATE connector_discovery_markers
       SET evaluated_at = now(), bonus_awarded = $1
       WHERE id = $2
-    `, [didSurge, marker.id]);
+    `,
+      [didSurge, marker.id]
+    );
   }
 
   return { evaluated: pendingMarkers.length };
 }
-
 
 /**
  * ============================================================
@@ -270,7 +297,8 @@ async function awardTopTalentBonuses(arenaSessionId, { db, io }) {
   // Per ogni Connector, il punteggio del suo membro più popolare
   // (DISTINCT ON connector_id, ordinato per punti) — poi i primi 3
   // Connector per quel valore, in ordine.
-  const topThree = await db.queryAll(`
+  const topThree = await db.queryAll(
+    `
     WITH member_points AS (
       SELECT sm.connector_id, sm.member_id, COALESCE(SUM(pl.points), 0) AS points
       FROM squad_memberships sm
@@ -288,30 +316,37 @@ async function awardTopTalentBonuses(arenaSessionId, { db, io }) {
     FROM best_per_connector
     ORDER BY points DESC
     LIMIT 3
-  `, [arenaSessionId]);
+  `,
+    [arenaSessionId]
+  );
 
   for (let i = 0; i < topThree.length; i++) {
-    await awardPoints({
-      receiverId: topThree[i].connector_id,
-      arenaSessionId,
-      source: TOP_TALENT_BONUS_SOURCES[i],
-    }, { db, io });
+    await awardPoints(
+      {
+        receiverId: topThree[i].connector_id,
+        arenaSessionId,
+        source: TOP_TALENT_BONUS_SOURCES[i],
+      },
+      { db, io }
+    );
   }
 
   return { awarded: topThree.length };
 }
 
-
 // ------------------------------------------------------------
 // STATO CONNECTOR — sempre per singola sessione, mai permanente
 // ------------------------------------------------------------
 async function updateContributionPoints({ userId, arenaSessionId, delta }, { db }) {
-  await db.query(`
+  await db.query(
+    `
     INSERT INTO connector_status (user_id, arena_session_id, contribution_points)
     VALUES ($1, $2, $3)
     ON CONFLICT (user_id, arena_session_id)
     DO UPDATE SET contribution_points = connector_status.contribution_points + $3
-  `, [userId, arenaSessionId, delta]);
+  `,
+    [userId, arenaSessionId, delta]
+  );
 
   await recalculateTopConnectors(arenaSessionId, { db });
 }
@@ -322,7 +357,8 @@ async function updateContributionPoints({ userId, arenaSessionId, delta }, { db 
  * sera, mai un badge che si porta dietro da una serata all'altra.
  */
 async function recalculateTopConnectors(arenaSessionId, { db }) {
-  await db.query(`
+  await db.query(
+    `
     WITH ranked AS (
       SELECT id, PERCENT_RANK() OVER (ORDER BY contribution_points DESC) AS pct
       FROM connector_status
@@ -332,25 +368,33 @@ async function recalculateTopConnectors(arenaSessionId, { db }) {
     SET is_top_connector = (ranked.pct <= $2)
     FROM ranked
     WHERE connector_status.id = ranked.id
-  `, [arenaSessionId, CONNECTOR_TOP_PERCENTILE]);
+  `,
+    [arenaSessionId, CONNECTOR_TOP_PERCENTILE]
+  );
 }
 
 async function getConnectorStatus({ userId, arenaSessionId }, { db }) {
   if (!(await isTopConnectorEnabled({ db }))) return { contributionPoints: 0, isTopConnector: false };
-  const row = await db.query(`
+  const row = await db.query(
+    `
     SELECT contribution_points, is_top_connector FROM connector_status
     WHERE user_id = $1 AND arena_session_id = $2
-  `, [userId, arenaSessionId]);
+  `,
+    [userId, arenaSessionId]
+  );
   return row
     ? { contributionPoints: row.contribution_points, isTopConnector: row.is_top_connector }
     : { contributionPoints: 0, isTopConnector: false };
 }
 
 async function getLocalPoints({ userId, arenaSessionId }, { db }) {
-  const row = await db.query(`
+  const row = await db.query(
+    `
     SELECT COALESCE(SUM(points), 0) AS total FROM points_ledger
     WHERE user_id = $1 AND arena_session_id = $2 AND counts_toward_local = true
-  `, [userId, arenaSessionId]);
+  `,
+    [userId, arenaSessionId]
+  );
   return row.total || 0;
 }
 
@@ -372,9 +416,12 @@ async function awardTableSpendingBonus({ arenaSessionId, tableQrCode, venueId, s
     return { success: false, reason: 'big_spender_disabled' };
   }
 
-  const venue = await db.query(`
+  const venue = await db.query(
+    `
     SELECT spending_threshold_cents, spending_bonus_points FROM venues WHERE id = $1
-  `, [venueId]);
+  `,
+    [venueId]
+  );
 
   if (!venue || !venue.spending_threshold_cents) {
     return { success: false, reason: 'venue_has_no_spending_threshold_configured' };
@@ -386,28 +433,37 @@ async function awardTableSpendingBonus({ arenaSessionId, tableQrCode, venueId, s
   // Idempotenza: se questo tavolo ha già ricevuto il bonus stasera
   // (es. la spesa viene ri-confermata più volte durante la serata),
   // non lo assegniamo una seconda volta.
-  const alreadyAwarded = await db.query(`
+  const alreadyAwarded = await db.query(
+    `
     SELECT 1 FROM points_ledger pl
     JOIN squad_memberships sm ON sm.member_id = pl.user_id AND sm.arena_session_id = pl.arena_session_id
     WHERE sm.table_qr_code = $1 AND pl.arena_session_id = $2 AND pl.source = 'table_spending_threshold'
     LIMIT 1
-  `, [tableQrCode, arenaSessionId]);
+  `,
+    [tableQrCode, arenaSessionId]
+  );
   if (alreadyAwarded) return { success: false, reason: 'already_awarded_tonight' };
 
-  const members = await db.queryAll(`
+  const members = await db.queryAll(
+    `
     SELECT DISTINCT member_id FROM squad_memberships
     WHERE arena_session_id = $1 AND table_qr_code = $2
-  `, [arenaSessionId, tableQrCode]);
+  `,
+    [arenaSessionId, tableQrCode]
+  );
 
   if (members.length === 0) return { success: false, reason: 'no_squad_found_for_table' };
 
   const perPersonPoints = Math.round(venue.spending_bonus_points / members.length);
 
   for (const member of members) {
-    await db.query(`
+    await db.query(
+      `
       INSERT INTO points_ledger (user_id, arena_session_id, points, source)
       VALUES ($1, $2, $3, 'table_spending_threshold')
-    `, [member.member_id, arenaSessionId, perPersonPoints]);
+    `,
+      [member.member_id, arenaSessionId, perPersonPoints]
+    );
 
     io.to(`arena_${arenaSessionId}`).emit('points_update', {
       userId: member.member_id,
@@ -420,7 +476,6 @@ async function awardTableSpendingBonus({ arenaSessionId, tableQrCode, venueId, s
 
   return { success: true, membersRewarded: members.length, perPersonPoints };
 }
-
 
 /**
  * ============================================================
@@ -438,10 +493,13 @@ async function awardTableSpendingBonus({ arenaSessionId, tableQrCode, venueId, s
  * conoscere o inserire a mano un ID tecnico di sessione.
  */
 async function awardTableSpendingBonusByVenue({ venueId, tableQrCode, spentCents }, { db, io }) {
-  const session = await db.query(`
+  const session = await db.query(
+    `
     SELECT id FROM arena_sessions
     WHERE venue_id = $1 AND session_date = current_business_date($1)
-  `, [venueId]);
+  `,
+    [venueId]
+  );
 
   if (!session) return { success: false, reason: 'no_active_session_tonight' };
 
@@ -454,9 +512,12 @@ async function awardTableSpendingBonusByVenue({ venueId, tableQrCode, spentCents
  * con ogni proprietario in base al proprio listino).
  */
 async function updateVenueSpendingConfig({ venueId, thresholdCents, bonusPoints }, { db }) {
-  await db.query(`
+  await db.query(
+    `
     UPDATE venues SET spending_threshold_cents = $1, spending_bonus_points = $2 WHERE id = $3
-  `, [thresholdCents, bonusPoints, venueId]);
+  `,
+    [thresholdCents, bonusPoints, venueId]
+  );
   return { success: true };
 }
 

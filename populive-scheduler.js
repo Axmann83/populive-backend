@@ -20,8 +20,8 @@ const { evaluatePendingDiscoveryMarkers, awardTopTalentBonuses } = require('./po
 const { refundAbandonedPulsesForSession } = require('./populive-interactions-logic');
 
 const TICK_INTERVAL_MS = 5 * 60 * 1000; // ogni 5 minuti — abbastanza spesso da non far
-                                          // aspettare troppo un locale che sta per aprire,
-                                          // abbastanza raro da non sovraccaricare il database
+// aspettare troppo un locale che sta per aprire,
+// abbastanza raro da non sovraccaricare il database
 
 /**
  * Un singolo "giro" del motore — controlla ogni locale e decide
@@ -70,7 +70,7 @@ async function runSchedulerTick({ db, redis, io }) {
   try {
     await grantWeeklyFreePulses({ db });
   } catch (err) {
-    console.error('[scheduler] errore nell\'assegnazione Pulse gratis settimanali:', err);
+    console.error("[scheduler] errore nell'assegnazione Pulse gratis settimanali:", err);
   }
 
   // Saldo Superlike: stesso principio della Pulse gratis — parte da
@@ -140,20 +140,26 @@ async function isVenueWithinOpenWindow(venue, { db }) {
  * la creiamo. Se esiste già, non facciamo nulla — evitiamo di
  * "riaprire" per errore una sessione già gestita.
  */
-async function ensureSessionOpen(venue, { db, io }) {
+async function ensureSessionOpen(venue, { db }) {
   const dateRow = await db.query(`SELECT current_business_date($1) AS bdate`, [venue.id]);
   const businessDate = dateRow.bdate;
 
-  const existing = await db.query(`
+  const existing = await db.query(
+    `
     SELECT id FROM arena_sessions WHERE venue_id = $1 AND session_date = $2
-  `, [venue.id, businessDate]);
+  `,
+    [venue.id, businessDate]
+  );
 
   if (existing) return; // già aperta, niente da fare
 
-  await db.query(`
+  await db.query(
+    `
     INSERT INTO arena_sessions (venue_id, session_date, opened_at, is_open_for_checkin, is_active)
     VALUES ($1, $2, now(), true, false)
-  `, [venue.id, businessDate]);
+  `,
+    [venue.id, businessDate]
+  );
 
   // Non serve avvisare nessuno via WebSocket qui — non c'è ancora
   // nessuno collegato a una sessione che non esisteva un attimo fa.
@@ -169,19 +175,25 @@ async function ensureSessionOpen(venue, { db, io }) {
  * solo il "vivo" della serata sparisce.
  */
 async function closeSessionIfOpen(venue, { db, redis, io }) {
-  const openSession = await db.query(`
+  const openSession = await db.query(
+    `
     SELECT id FROM arena_sessions
     WHERE venue_id = $1 AND is_open_for_checkin = true AND closed_at IS NULL
     ORDER BY opened_at DESC LIMIT 1
-  `, [venue.id]);
+  `,
+    [venue.id]
+  );
 
   if (!openSession) return; // niente da chiudere
 
-  await db.query(`
+  await db.query(
+    `
     UPDATE arena_sessions
     SET is_open_for_checkin = false, closed_at = now()
     WHERE id = $1
-  `, [openSession.id]);
+  `,
+    [openSession.id]
+  );
 
   // Chat: rispetta il doppio consenso "conserva" già costruito —
   // chiude solo quelle senza consenso reciproco.

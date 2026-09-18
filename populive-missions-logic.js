@@ -25,21 +25,31 @@
  * Crea una nuova missione sponsorizzata — chiamata dalla dashboard,
  * mai da un locale o da un utente normale.
  */
-async function createMission({ sponsorName, venueId, claimText, bonusPoints, radiusMeters, hashtagFilter, dateFrom, dateTo }, { db }) {
+async function createMission(
+  { sponsorName, venueId, claimText, bonusPoints, radiusMeters, hashtagFilter, dateFrom, dateTo },
+  { db }
+) {
   if (!sponsorName || !venueId || !claimText || !bonusPoints || !dateFrom || !dateTo) {
     return { success: false, reason: 'missing_fields' };
   }
 
-  const mission = await db.query(`
+  const mission = await db.query(
+    `
     INSERT INTO sponsored_missions (sponsor_name, venue_id, claim_text, bonus_points, radius_meters, hashtag_filter, date_from, date_to, is_active)
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)
     RETURNING id
-  `, [
-    sponsorName, venueId, claimText, bonusPoints,
-    radiusMeters || 2000,
-    hashtagFilter && hashtagFilter.length > 0 ? hashtagFilter : null,
-    dateFrom, dateTo,
-  ]);
+  `,
+    [
+      sponsorName,
+      venueId,
+      claimText,
+      bonusPoints,
+      radiusMeters || 2000,
+      hashtagFilter && hashtagFilter.length > 0 ? hashtagFilter : null,
+      dateFrom,
+      dateTo,
+    ]
+  );
 
   return { success: true, missionId: mission.id };
 }
@@ -71,10 +81,13 @@ async function getAllMissions({}, { db }) {
 }
 
 async function completeMission({ missionId, userId }, { db, io }) {
-  const mission = await db.query(`
+  const mission = await db.query(
+    `
     SELECT id, sponsor_name, claim_text, bonus_points, is_active, date_from, date_to
     FROM sponsored_missions WHERE id = $1
-  `, [missionId]);
+  `,
+    [missionId]
+  );
 
   if (!mission) return { success: false, reason: 'mission_not_found' };
   if (!mission.is_active) return { success: false, reason: 'mission_inactive' };
@@ -84,22 +97,33 @@ async function completeMission({ missionId, userId }, { db, io }) {
     return { success: false, reason: 'mission_not_in_window' };
   }
 
-  const already = await db.query(`
+  const already = await db.query(
+    `
     SELECT 1 FROM mission_completions WHERE mission_id = $1 AND user_id = $2
-  `, [missionId, userId]);
+  `,
+    [missionId, userId]
+  );
   if (already) return { success: false, reason: 'already_completed' };
 
-  await db.query(`
+  await db.query(
+    `
     INSERT INTO mission_completions (mission_id, user_id) VALUES ($1, $2)
-  `, [missionId, userId]);
+  `,
+    [missionId, userId]
+  );
 
-  await db.query(`
+  await db.query(
+    `
     INSERT INTO points_ledger (user_id, arena_session_id, points, source, counts_toward_local)
     VALUES ($1, NULL, $2, 'mission_completed', false)
-  `, [userId, mission.bonus_points]);
+  `,
+    [userId, mission.bonus_points]
+  );
 
   io.to(`user_${userId}`).emit('points_update', {
-    userId, points: mission.bonus_points, source: 'mission_completed',
+    userId,
+    points: mission.bonus_points,
+    source: 'mission_completed',
   });
 
   return {
@@ -116,10 +140,13 @@ async function completeMission({ missionId, userId }, { db, io }) {
  * scansionando il QR ma senza aver ancora completato nulla.
  */
 async function getMissionPreview({ missionId }, { db }) {
-  const mission = await db.query(`
+  const mission = await db.query(
+    `
     SELECT id, sponsor_name, claim_text, bonus_points, is_active, date_from, date_to
     FROM sponsored_missions WHERE id = $1
-  `, [missionId]);
+  `,
+    [missionId]
+  );
 
   if (!mission) return { success: false, reason: 'mission_not_found' };
 
@@ -149,16 +176,20 @@ async function getMissionPreview({ missionId }, { db }) {
  * la lista è semplicemente vuota — mai un errore.
  */
 async function getMissionsNearUser({ userId }, { db }) {
-  const user = await db.query(`
+  const user = await db.query(
+    `
     SELECT last_latitude, last_longitude, sponsored_missions_enabled
     FROM users WHERE id = $1
-  `, [userId]);
+  `,
+    [userId]
+  );
 
   if (!user || !user.sponsored_missions_enabled || user.last_latitude === null || user.last_longitude === null) {
     return { success: true, missions: [] };
   }
 
-  const missions = await db.queryAll(`
+  const missions = await db.queryAll(
+    `
     WITH candidates AS (
       SELECT sm.id, sm.sponsor_name, sm.claim_text, sm.bonus_points, sm.radius_meters, v.name AS venue_name,
         6371000 * acos(LEAST(1, GREATEST(-1,
@@ -184,7 +215,9 @@ async function getMissionsNearUser({ userId }, { db }) {
     SELECT * FROM candidates
     WHERE distance_meters <= radius_meters
     ORDER BY distance_meters ASC
-  `, [user.last_latitude, user.last_longitude, userId]);
+  `,
+    [user.last_latitude, user.last_longitude, userId]
+  );
 
   return {
     success: true,

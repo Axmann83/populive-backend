@@ -23,7 +23,6 @@ const MAX_HASHTAGS_PER_USER = 5; // valore indicativo, evita profili con 40 hash
 const ALLOWED_GENDER_VALUES = ['male', 'female', 'other'];
 
 async function createProfile({ userId, displayName, bio, hashtagNames, genderForStats }, { db }) {
-
   if (!displayName || displayName.trim().length < 2) {
     return { success: false, reason: 'display_name_required' };
   }
@@ -35,11 +34,14 @@ async function createProfile({ userId, displayName, bio, hashtagNames, genderFor
   // la registrazione — nessuno deve sentirsi obbligato a rispondere.
   const validatedGender = ALLOWED_GENDER_VALUES.includes(genderForStats) ? genderForStats : null;
 
-  const user = await db.query(`
+  const user = await db.query(
+    `
     UPDATE users SET display_name = $1, bio = $2, gender_for_stats = $3
     WHERE id = $4
     RETURNING id
-  `, [displayName.trim(), bio || null, validatedGender, userId]);
+  `,
+    [displayName.trim(), bio || null, validatedGender, userId]
+  );
 
   if (!user) return { success: false, reason: 'user_not_found' };
 
@@ -64,16 +66,22 @@ async function attachHashtags(userId, hashtagNames, { db }) {
 
     // "Trova o crea" l'hashtag — se già esiste (es. altri lo usano
     // già) lo riusiamo, non ne creiamo uno duplicato.
-    const hashtag = await db.query(`
+    const hashtag = await db.query(
+      `
       INSERT INTO hashtags (name) VALUES ($1)
       ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
       RETURNING id
-    `, [name]);
+    `,
+      [name]
+    );
 
-    await db.query(`
+    await db.query(
+      `
       INSERT INTO user_hashtags (user_id, hashtag_id) VALUES ($1, $2)
       ON CONFLICT DO NOTHING
-    `, [userId, hashtag.id]);
+    `,
+      [userId, hashtag.id]
+    );
   }
 }
 
@@ -114,7 +122,6 @@ function normalizeHashtag(raw) {
   return `#${cleaned}`;
 }
 
-
 // ------------------------------------------------------------
 // SCHERMATA DI CONSENSO — il passaggio obbligatorio prima di
 // poter usare l'app per davvero (mai saltabile, mai un malus
@@ -132,7 +139,8 @@ async function completeOnboarding({ userId, consentChoices }, { db }) {
     return { success: false, reason: 'legal_consent_missing' };
   }
 
-  await db.query(`
+  await db.query(
+    `
     UPDATE users
     SET onboarding_completed = true,
         sponsored_missions_enabled = $1,
@@ -144,19 +152,20 @@ async function completeOnboarding({ userId, consentChoices }, { db }) {
         terms_version_accepted = $6,
         terms_accepted_at = now()
     WHERE id = $7
-  `, [
-    consentChoices.sponsoredMissionsEnabled ?? false,
-    consentChoices.appearsInHistoricalSearch ?? true,
-    consentChoices.receivePulsesEnabled ?? true,
-    consentChoices.contactFilter ?? 'everyone',
-    consentChoices.privacyPolicyVersionAccepted,
-    consentChoices.termsVersionAccepted,
-    userId,
-  ]);
+  `,
+    [
+      consentChoices.sponsoredMissionsEnabled ?? false,
+      consentChoices.appearsInHistoricalSearch ?? true,
+      consentChoices.receivePulsesEnabled ?? true,
+      consentChoices.contactFilter ?? 'everyone',
+      consentChoices.privacyPolicyVersionAccepted,
+      consentChoices.termsVersionAccepted,
+      userId,
+    ]
+  );
 
   return { success: true };
 }
-
 
 // ------------------------------------------------------------
 // IL "CANCELLO": nessuna azione reale nell'app prima di questo
@@ -166,15 +175,17 @@ async function completeOnboarding({ userId, consentChoices }, { db }) {
 // like, superlike...). Non modifica handleCheckin già scritto:
 // si inserisce PRIMA, come controllo di accesso.
 async function requireCompletedOnboarding(userId, { db }) {
-  const user = await db.query(`
+  const user = await db.query(
+    `
     SELECT onboarding_completed FROM users WHERE id = $1
-  `, [userId]);
+  `,
+    [userId]
+  );
 
   if (!user) return { allowed: false, reason: 'user_not_found' };
   if (!user.onboarding_completed) return { allowed: false, reason: 'onboarding_incomplete' };
   return { allowed: true };
 }
-
 
 /**
  * ============================================================
@@ -187,11 +198,14 @@ async function requireCompletedOnboarding(userId, { db }) {
  * ============================================================
  */
 async function getPublicProfile({ userId, arenaSessionId, viewerId }, { db }) {
-  const profile = await db.query(`
+  const profile = await db.query(
+    `
     SELECT display_name, photo_url, avatar_emoji, bio, instant_influencer_category,
            is_premium, premium_expires_at, is_verified
     FROM users WHERE id = $1
-  `, [userId]);
+  `,
+    [userId]
+  );
 
   if (!profile) return { success: false, reason: 'user_not_found' };
 
@@ -200,37 +214,49 @@ async function getPublicProfile({ userId, arenaSessionId, viewerId }, { db }) {
   // di riproporre il bottone d'acquisto.
   let verificationPending = false;
   if (!profile.is_verified) {
-    const pendingRow = await db.query(`
+    const pendingRow = await db.query(
+      `
       SELECT 1 FROM verification_requests WHERE user_id = $1 AND status = 'pending'
-    `, [userId]);
+    `,
+      [userId]
+    );
     verificationPending = !!pendingRow;
   }
 
-  const hashtagRows = await db.queryAll(`
+  const hashtagRows = await db.queryAll(
+    `
     SELECT h.name FROM hashtags h
     JOIN user_hashtags uh ON uh.hashtag_id = h.id
     WHERE uh.user_id = $1
-  `, [userId]);
+  `,
+    [userId]
+  );
 
   // Prodotti sponsorizzati — recuperati solo se il profilo È
   // davvero un Instant Influencer, per non fare una query a vuoto
   // per il 99% dei profili che non lo sono.
   let sponsoredProducts = [];
   if (profile.instant_influencer_category) {
-    const productRows = await db.queryAll(`
+    const productRows = await db.queryAll(
+      `
       SELECT product_name, product_url FROM instant_influencer_products
       WHERE user_id = $1 ORDER BY sort_order ASC, created_at ASC
-    `, [userId]);
+    `,
+      [userId]
+    );
     sponsoredProducts = productRows.map((p) => ({ name: p.product_name, url: p.product_url }));
   }
 
   let isTopConnector = false;
   let isTopSpender = false;
   if (arenaSessionId) {
-    const connectorRow = await db.query(`
+    const connectorRow = await db.query(
+      `
       SELECT is_top_connector FROM connector_status
       WHERE user_id = $1 AND arena_session_id = $2
-    `, [userId, arenaSessionId]);
+    `,
+      [userId, arenaSessionId]
+    );
     // Stesso principio del Big Spender qui sotto: un solo interruttore
     // ("Top Connector" in dashboard) spegne il dato ovunque nell'app,
     // controllato qui alla lettura — coerenza voluta esplicitamente.
@@ -238,10 +264,13 @@ async function getPublicProfile({ userId, arenaSessionId, viewerId }, { db }) {
     const topConnectorEnabled = topConnectorFlag ? topConnectorFlag.is_enabled : true;
     isTopConnector = topConnectorEnabled && !!connectorRow?.is_top_connector;
 
-    const spenderRow = await db.query(`
+    const spenderRow = await db.query(
+      `
       SELECT is_top_spender FROM spender_status
       WHERE user_id = $1 AND arena_session_id = $2
-    `, [userId, arenaSessionId]);
+    `,
+      [userId, arenaSessionId]
+    );
     // Un solo interruttore ("Big Spender" in dashboard) spegne
     // questo dato ovunque nell'app — controllato qui alla lettura,
     // così funziona anche su dati vecchi già in tabella, non solo
@@ -255,9 +284,11 @@ async function getPublicProfile({ userId, arenaSessionId, viewerId }, { db }) {
   // per il Big Spender: controllato qui alla lettura, così vale sia
   // per la card nel Radar sia per il profilo completo, che passano
   // entrambi da questa stessa funzione.
-  const instantInfluencerFlag = await db.query(`SELECT is_enabled FROM feature_flags WHERE feature_key = 'instant_influencer'`);
+  const instantInfluencerFlag = await db.query(
+    `SELECT is_enabled FROM feature_flags WHERE feature_key = 'instant_influencer'`
+  );
   const instantInfluencerEnabled = instantInfluencerFlag ? instantInfluencerFlag.is_enabled : true;
-  const finalInstantInfluencerCategory = instantInfluencerEnabled ? (profile.instant_influencer_category || null) : null;
+  const finalInstantInfluencerCategory = instantInfluencerEnabled ? profile.instant_influencer_category || null : null;
   const finalSponsoredProducts = instantInfluencerEnabled ? sponsoredProducts : [];
 
   const founderRow = await db.query(`SELECT 1 FROM founder_bracelets WHERE user_id = $1`, [userId]);
@@ -271,7 +302,8 @@ async function getPublicProfile({ userId, arenaSessionId, viewerId }, { db }) {
   // recente — un piccolo promemoria, non uno storico completo.
   let pastMatch = null;
   if (viewerId && viewerId !== userId) {
-    const pastMatchRow = await db.query(`
+    const pastMatchRow = await db.query(
+      `
       SELECT cc.created_at, v.name AS venue_name
       FROM chat_conversations cc
       JOIN arena_sessions a ON a.id = cc.arena_session_id
@@ -280,7 +312,9 @@ async function getPublicProfile({ userId, arenaSessionId, viewerId }, { db }) {
         AND cc.closed_at IS NOT NULL
       ORDER BY cc.created_at DESC
       LIMIT 1
-    `, [userId, viewerId]);
+    `,
+      [userId, viewerId]
+    );
     if (pastMatchRow) {
       pastMatch = { venueName: pastMatchRow.venue_name, matchedAt: pastMatchRow.created_at };
     }
@@ -330,17 +364,23 @@ async function findUserByPhone({ phoneNumber }, { db }) {
   const cleaned = phoneNumber.replace(/[^\d+]/g, '');
   const normalized = cleaned.startsWith('+') ? cleaned : cleaned.startsWith('39') ? `+${cleaned}` : `+39${cleaned}`;
 
-  const user = await db.query(`
+  const user = await db.query(
+    `
     SELECT id, display_name, photo_url, avatar_emoji, instant_influencer_category
     FROM users WHERE phone_number = $1
-  `, [normalized]);
+  `,
+    [normalized]
+  );
 
   if (!user) return { success: false, reason: 'user_not_found' };
 
-  const productRows = await db.queryAll(`
+  const productRows = await db.queryAll(
+    `
     SELECT id, product_name, product_url FROM instant_influencer_products
     WHERE user_id = $1 ORDER BY sort_order ASC, created_at ASC
-  `, [user.id]);
+  `,
+    [user.id]
+  );
 
   return {
     success: true,
@@ -371,10 +411,13 @@ async function setInstantInfluencerStatus({ userId, category, products }, { db }
     for (let i = 0; i < products.length; i++) {
       const p = products[i];
       if (!p.name?.trim()) continue;
-      await db.query(`
+      await db.query(
+        `
         INSERT INTO instant_influencer_products (user_id, product_name, product_url, sort_order)
         VALUES ($1, $2, $3, $4)
-      `, [userId, p.name.trim(), p.url?.trim() || null, i]);
+      `,
+        [userId, p.name.trim(), p.url?.trim() || null, i]
+      );
     }
   }
 

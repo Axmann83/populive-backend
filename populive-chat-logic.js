@@ -17,23 +17,29 @@
  * Crea la conversazione se non esiste già per questa coppia in
  * questa sessione (evita duplicati con lo UNIQUE dello schema).
  */
-async function openChatConversation({ userAId, userBId, arenaSessionId, unlockedVia }, { db, io }) {
+async function openChatConversation({ userAId, userBId, arenaSessionId, unlockedVia }, { db }) {
   // Normalizziamo l'ordine per rispettare lo UNIQUE (arena_session_id,
   // user_a_id, user_b_id) indipendentemente da chi dei due chiama per primo.
   const [a, b] = [userAId, userBId].sort();
 
-  const existing = await db.query(`
+  const existing = await db.query(
+    `
     SELECT id FROM chat_conversations
     WHERE arena_session_id = $1 AND user_a_id = $2 AND user_b_id = $3
-  `, [arenaSessionId, a, b]);
+  `,
+    [arenaSessionId, a, b]
+  );
 
   if (existing) return { conversationId: existing.id, alreadyExisted: true };
 
-  const conv = await db.query(`
+  const conv = await db.query(
+    `
     INSERT INTO chat_conversations (arena_session_id, user_a_id, user_b_id, unlocked_via)
     VALUES ($1, $2, $3, $4)
     RETURNING id
-  `, [arenaSessionId, a, b, unlockedVia]);
+  `,
+    [arenaSessionId, a, b, unlockedVia]
+  );
 
   return { conversationId: conv.id, alreadyExisted: false };
 }
@@ -57,21 +63,27 @@ async function openChatConversation({ userAId, userBId, arenaSessionId, unlocked
  * ritrovare quella già aperta.
  * ============================================================
  */
-async function openAdminChat({ architettoId, targetUserId }, { db, io }) {
+async function openAdminChat({ architettoId, targetUserId }, { db }) {
   const [a, b] = [architettoId, targetUserId].sort();
 
-  const existing = await db.query(`
+  const existing = await db.query(
+    `
     SELECT id FROM chat_conversations
     WHERE arena_session_id IS NULL AND user_a_id = $1 AND user_b_id = $2 AND unlocked_via = 'admin_direct'
-  `, [a, b]);
+  `,
+    [a, b]
+  );
 
   if (existing) return { conversationId: existing.id, alreadyExisted: true };
 
-  const conv = await db.query(`
+  const conv = await db.query(
+    `
     INSERT INTO chat_conversations (arena_session_id, user_a_id, user_b_id, unlocked_via)
     VALUES (NULL, $1, $2, 'admin_direct')
     RETURNING id
-  `, [a, b]);
+  `,
+    [a, b]
+  );
 
   return { conversationId: conv.id, alreadyExisted: false };
 }
@@ -102,11 +114,14 @@ async function sendMessage({ conversationId, senderId, body }, { db, io }) {
     return { success: false, reason: 'invalid_message' };
   }
 
-  const msg = await db.query(`
+  const msg = await db.query(
+    `
     INSERT INTO chat_messages (conversation_id, sender_id, body)
     VALUES ($1, $2, $3)
     RETURNING id, created_at
-  `, [conversationId, senderId, body.trim()]);
+  `,
+    [conversationId, senderId, body.trim()]
+  );
 
   // Notifica privata SOLO al destinatario — mai alla stanza
   // condivisa dell'Arena, un messaggio è sempre un fatto privato.
@@ -128,11 +143,14 @@ async function getMessages({ conversationId, requesterId }, { db }) {
     return { success: false, reason: 'not_a_participant' };
   }
 
-  const messages = await db.queryAll(`
+  const messages = await db.queryAll(
+    `
     SELECT id, sender_id, body, created_at FROM chat_messages
     WHERE conversation_id = $1
     ORDER BY created_at ASC
-  `, [conversationId]);
+  `,
+    [conversationId]
+  );
 
   const myWantsKeep = conv.user_a_id === requesterId ? conv.user_a_wants_keep : conv.user_b_wants_keep;
   const theirWantsKeep = conv.user_a_id === requesterId ? conv.user_b_wants_keep : conv.user_a_wants_keep;
@@ -173,20 +191,25 @@ async function setChatKeepPreference({ conversationId, userId, wantsKeep }, { db
   // l'interruttore "richiedi Conserva esplicito" è acceso — a
   // interruttore spento questo bottone non è nemmeno mostrato in
   // ChatWindow.jsx, ma controlliamo anche qui per sicurezza (26/8).
-  const keepRequiredFlag = await db.query(`SELECT is_enabled FROM feature_flags WHERE feature_key = 'chat_keep_required'`);
+  const keepRequiredFlag = await db.query(
+    `SELECT is_enabled FROM feature_flags WHERE feature_key = 'chat_keep_required'`
+  );
   const keepRequired = keepRequiredFlag ? keepRequiredFlag.is_enabled : true;
-  const sessionAlreadyEnded = keepRequired && await isSessionEnded(conv.arena_session_id, { db });
+  const sessionAlreadyEnded = keepRequired && (await isSessionEnded(conv.arena_session_id, { db }));
   if (!wantsKeep && sessionAlreadyEnded && conv.closed_at === null) {
     // Stesso declassamento del blocco "da match" già applicato in
     // closeConversationsForSession, per lo stesso identico motivo —
     // qui capita quando qualcuno ritira il consenso DOPO che la
     // serata originale è già finita, un punto di chiusura diverso
     // ma concettualmente lo stesso evento.
-    await db.query(`
+    await db.query(
+      `
       UPDATE blocks SET arena_session_id = $3
       WHERE reason = 'match' AND arena_session_id IS NULL
         AND ((blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1))
-    `, [conv.user_a_id, conv.user_b_id, conv.arena_session_id]);
+    `,
+      [conv.user_a_id, conv.user_b_id, conv.arena_session_id]
+    );
 
     await db.query(`UPDATE chat_conversations SET closed_at = now() WHERE id = $1`, [conversationId]);
     io.to(`user_${userId}`).emit('chat_closed', { conversationId, reason: 'preference_withdrawn' });
@@ -200,9 +223,12 @@ async function setChatKeepPreference({ conversationId, userId, wantsKeep }, { db
 // Controlla se la sessione a cui appartiene questa chat è già finita
 // (utile per capire se siamo nella fase "oltre la serata originale").
 async function isSessionEnded(arenaSessionId, { db }) {
-  const session = await db.query(`
+  const session = await db.query(
+    `
     SELECT is_open_for_checkin FROM arena_sessions WHERE id = $1
-  `, [arenaSessionId]);
+  `,
+    [arenaSessionId]
+  );
   return session ? !session.is_open_for_checkin : true;
 }
 
@@ -249,31 +275,42 @@ async function closeConversationsForSession(arenaSessionId, { db }) {
   // già incontrati") resta pronto e corretto per quando l'interruttore
   // verrà riacceso — semplicemente non si attiva mai finché non c'è
   // nessuna chat da chiudere.
-  const keepRequiredFlag = await db.query(`SELECT is_enabled FROM feature_flags WHERE feature_key = 'chat_keep_required'`);
+  const keepRequiredFlag = await db.query(
+    `SELECT is_enabled FROM feature_flags WHERE feature_key = 'chat_keep_required'`
+  );
   const keepRequired = keepRequiredFlag ? keepRequiredFlag.is_enabled : true;
   if (!keepRequired) return;
 
-  const toClose = await db.queryAll(`
+  const toClose = await db.queryAll(
+    `
     SELECT user_a_id, user_b_id FROM chat_conversations
     WHERE arena_session_id = $1
       AND closed_at IS NULL
       AND NOT (user_a_wants_keep AND user_b_wants_keep)
-  `, [arenaSessionId]);
+  `,
+    [arenaSessionId]
+  );
 
   for (const pair of toClose) {
-    await db.query(`
+    await db.query(
+      `
       UPDATE blocks SET arena_session_id = $3
       WHERE reason = 'match' AND arena_session_id IS NULL
         AND ((blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1))
-    `, [pair.user_a_id, pair.user_b_id, arenaSessionId]);
+    `,
+      [pair.user_a_id, pair.user_b_id, arenaSessionId]
+    );
   }
 
-  await db.query(`
+  await db.query(
+    `
     UPDATE chat_conversations SET closed_at = now()
     WHERE arena_session_id = $1
       AND closed_at IS NULL
       AND NOT (user_a_wants_keep AND user_b_wants_keep)
-  `, [arenaSessionId]);
+  `,
+    [arenaSessionId]
+  );
 }
 
 /**
@@ -308,12 +345,15 @@ async function purgeExpiredChatMessages({ db }) {
  * browser, sparendo ad ogni refresh.
  */
 async function getMyActiveConversations({ userId }, { db }) {
-  const rows = await db.queryAll(`
+  const rows = await db.queryAll(
+    `
     SELECT id, user_a_id, user_b_id
     FROM chat_conversations
     WHERE (user_a_id = $1 OR user_b_id = $1) AND closed_at IS NULL
     ORDER BY created_at DESC
-  `, [userId]);
+  `,
+    [userId]
+  );
 
   return rows.map((r) => ({
     conversationId: r.id,
@@ -345,7 +385,8 @@ async function markConversationRead({ conversationId, userId }, { db }) {
  * volta che questa persona ha aperto proprio QUELLA chat.
  */
 async function getUnreadChatCount({ userId }, { db }) {
-  const row = await db.query(`
+  const row = await db.query(
+    `
     SELECT COUNT(*) AS total FROM chat_conversations c
     WHERE (c.user_a_id = $1 OR c.user_b_id = $1) AND c.closed_at IS NULL
       AND EXISTS (
@@ -357,8 +398,21 @@ async function getUnreadChatCount({ userId }, { db }) {
             '1970-01-01'::timestamptz
           )
       )
-  `, [userId]);
+  `,
+    [userId]
+  );
   return parseInt(row?.total) || 0;
 }
 
-module.exports = { openChatConversation, openAdminChat, sendMessage, getMessages, closeConversationsForSession, setChatKeepPreference, purgeExpiredChatMessages, getMyActiveConversations, markConversationRead, getUnreadChatCount };
+module.exports = {
+  openChatConversation,
+  openAdminChat,
+  sendMessage,
+  getMessages,
+  closeConversationsForSession,
+  setChatKeepPreference,
+  purgeExpiredChatMessages,
+  getMyActiveConversations,
+  markConversationRead,
+  getUnreadChatCount,
+};

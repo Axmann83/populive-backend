@@ -19,17 +19,19 @@ const { refundPulseCredit, createIgnoredCooldownBlock } = require('./populive-in
 const { broadcastToOthers } = require('./populive-websocket-rooms');
 
 async function handleCheckin({ userId, venueId }, { db, redis, io }) {
-
   // ------------------------------------------------------------
   // STEP 1 — Trovare (o rifiutare) la sessione Arena di oggi
   // ------------------------------------------------------------
-  const session = await db.query(`
+  const session = await db.query(
+    `
     SELECT arena_sessions.id, is_open_for_checkin, is_active, checkin_threshold
     FROM arena_sessions
     JOIN venues ON venues.id = arena_sessions.venue_id
     WHERE arena_sessions.venue_id = $1
       AND arena_sessions.session_date = current_business_date($1)
-  `, [venueId]);
+  `,
+    [venueId]
+  );
 
   if (!session || !session.is_open_for_checkin) {
     // Il locale non ha ancora aperto secondo i suoi orari,
@@ -45,15 +47,13 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
   // errore grave — semplicemente non ripetiamo il conteggio.
   // Rispondiamo "success" comunque, così il telefono dell'utente
   // vede una schermata coerente (è già dentro), non un errore.
-  const alreadyCheckedIn = await redis.sismember(
-    `arena:${session.id}:radar`, userId
-  );
+  const alreadyCheckedIn = await redis.sismember(`arena:${session.id}:radar`, userId);
 
   if (alreadyCheckedIn) {
-    const currentCount = await redis.get(`arena:${session.id}:checkin_count`) || 0;
+    const currentCount = (await redis.get(`arena:${session.id}:checkin_count`)) || 0;
     return {
       success: true,
-      alreadyIn: true,                 // il frontend sa di non festeggiare un "nuovo" check-in
+      alreadyIn: true, // il frontend sa di non festeggiare un "nuovo" check-in
       arenaSessionId: session.id,
       arenaActive: session.is_active,
       checkinCount: parseInt(currentCount),
@@ -64,10 +64,13 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
   // ------------------------------------------------------------
   // STEP 2 — Scrivere l'evento permanente in Postgres
   // ------------------------------------------------------------
-  await db.query(`
+  await db.query(
+    `
     INSERT INTO checkins (user_id, arena_session_id, checked_in_at)
     VALUES ($1, $2, now())
-  `, [userId, session.id]);
+  `,
+    [userId, session.id]
+  );
 
   // ------------------------------------------------------------
   // STEP 2.5 — Un Pulse è legato al locale in cui è stato ricevuto.
@@ -88,14 +91,17 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
   //     locale giusto (il controllo vero è già a monte, al momento
   //     del riscatto — v. populive-api-server.js, confronto tra
   //     origin_venue_id e il locale in cui si prova a riscattare).
-  const abandonedPulses = await db.queryAll(`
+  const abandonedPulses = await db.queryAll(
+    `
     SELECT p.id, p.sender_id
     FROM pulses p
     JOIN arena_sessions a ON a.id = p.arena_session_id
     WHERE p.receiver_id = $1
       AND p.status IN ('pending', 'ignored')
       AND a.venue_id != $2
-  `, [userId, venueId]);
+  `,
+    [userId, venueId]
+  );
 
   for (const p of abandonedPulses) {
     await refundPulseCredit({ userId: p.sender_id }, { db });
@@ -103,10 +109,13 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
   }
 
   if (abandonedPulses.length > 0) {
-    await db.query(`
+    await db.query(
+      `
       UPDATE pulses SET status = 'expired'
       WHERE id = ANY($1)
-    `, [abandonedPulses.map((p) => p.id)]);
+    `,
+      [abandonedPulses.map((p) => p.id)]
+    );
   }
 
   // Un Superlike mai deciso e abbandonato (cambio locale) passa a
@@ -115,7 +124,8 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
   // in nessun caso (stesso principio di Tinder/Hinge, ripensato
   // rispetto alla correzione del 22/8 — la Pulse invece resta
   // rimborsabile, coinvolge un vero pagamento).
-  const abandonedSuperlikes = await db.queryAll(`
+  const abandonedSuperlikes = await db.queryAll(
+    `
     SELECT i.id, i.sender_id
     FROM interactions i
     JOIN arena_sessions a ON a.id = i.arena_session_id
@@ -123,17 +133,22 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
       AND i.type = 'superlike'
       AND i.status IN ('sent', 'ignored')
       AND a.venue_id != $2
-  `, [userId, venueId]);
+  `,
+    [userId, venueId]
+  );
 
   for (const i of abandonedSuperlikes) {
     await createIgnoredCooldownBlock({ ignoredUserId: i.sender_id, ignorerUserId: userId }, { db });
   }
 
   if (abandonedSuperlikes.length > 0) {
-    await db.query(`
+    await db.query(
+      `
       UPDATE interactions SET status = 'expired'
       WHERE id = ANY($1)
-    `, [abandonedSuperlikes.map((i) => i.id)]);
+    `,
+      [abandonedSuperlikes.map((i) => i.id)]
+    );
   }
 
   // Stessa regola estesa al Like semplice (26/8, richiesta esplicita
@@ -143,7 +158,8 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
   // Cerchiamo i Like ricevuti mai sfociati in un match, abbandonati
   // allo stesso identico modo (cambio locale) — solo il raffreddamento
   // si applica qui, nessuno stato da aggiornare, nessun credito.
-  const abandonedLikes = await db.queryAll(`
+  const abandonedLikes = await db.queryAll(
+    `
     SELECT i.id, i.sender_id
     FROM interactions i
     JOIN arena_sessions a ON a.id = i.arena_session_id
@@ -155,7 +171,9 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
         SELECT 1 FROM interactions r
         WHERE r.sender_id = $1 AND r.receiver_id = i.sender_id AND r.type = 'like'
       )
-  `, [userId, venueId]);
+  `,
+    [userId, venueId]
+  );
 
   for (const i of abandonedLikes) {
     await createIgnoredCooldownBlock({ ignoredUserId: i.sender_id, ignorerUserId: userId }, { db });
@@ -188,23 +206,29 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
     // Stima di ripiego: contiamo quanti check-in risultano già
     // in Postgres per questa sessione, così il numero mostrato
     // non torna a zero anche se Redis è giù.
-    const fallback = await db.query(`
+    const fallback = await db.query(
+      `
       SELECT COUNT(*) FROM checkins WHERE arena_session_id = $1
-    `, [session.id]);
+    `,
+      [session.id]
+    );
     newCount = parseInt(fallback.count);
   }
 
   // ------------------------------------------------------------
   // STEP 4 — L'Arena ha appena raggiunto la soglia? (solo la prima volta)
   // ------------------------------------------------------------
-  const justActivated = (newCount === session.checkin_threshold) && !session.is_active;
+  const justActivated = newCount === session.checkin_threshold && !session.is_active;
 
   if (justActivated) {
-    await db.query(`
+    await db.query(
+      `
       UPDATE arena_sessions
       SET is_active = true, activated_at = now()
       WHERE id = $1
-    `, [session.id]);
+    `,
+      [session.id]
+    );
   }
 
   // ------------------------------------------------------------
@@ -237,7 +261,7 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
   return {
     success: true,
     alreadyIn: false,
-    degraded: !redisOk,               // il frontend può mostrare un piccolo indicatore se serve
+    degraded: !redisOk, // il frontend può mostrare un piccolo indicatore se serve
     arenaSessionId: session.id,
     arenaActive: session.is_active || justActivated,
     checkinCount: newCount,
@@ -270,9 +294,9 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
  * ============================================================
  */
 const GEOFENCE_RADIUS_METERS = 200; // valore di partenza, uguale per tutti i locali — in
-                                     // futuro potrebbe diventare una colonna per-locale
-                                     // (un locale all'aperto molto grande potrebbe volerlo
-                                     // più largo di uno piccolo al chiuso)
+// futuro potrebbe diventare una colonna per-locale
+// (un locale all'aperto molto grande potrebbe volerlo
+// più largo di uno piccolo al chiuso)
 
 async function evaluateLocationPing({ userId, arenaSessionId, latitude, longitude }, { db, io }) {
   if (typeof latitude !== 'number' || typeof longitude !== 'number') {
@@ -282,7 +306,8 @@ async function evaluateLocationPing({ userId, arenaSessionId, latitude, longitud
   // Il check-in ancora "aperto" (mai chiuso) per questo utente in
   // questa sessione — se non esiste, non c'è nulla da far decadere
   // (o non è mai entrato, o è già uscito, es. via disconnessione).
-  const checkin = await db.query(`
+  const checkin = await db.query(
+    `
     SELECT
       checkins.id,
       venues.latitude AS venue_lat,
@@ -297,7 +322,9 @@ async function evaluateLocationPing({ userId, arenaSessionId, latitude, longitud
     WHERE checkins.user_id = $1
       AND checkins.arena_session_id = $2
       AND checkins.checked_out_at IS NULL
-  `, [userId, arenaSessionId, latitude, longitude]);
+  `,
+    [userId, arenaSessionId, latitude, longitude]
+  );
 
   if (!checkin) {
     return { success: true, alreadyOut: true };
@@ -318,9 +345,12 @@ async function evaluateLocationPing({ userId, arenaSessionId, latitude, longitud
 
   // Oltre il raggio: il check-in decade davvero, stesso identico
   // effetto della disconnessione WebSocket.
-  await db.query(`
+  await db.query(
+    `
     UPDATE checkins SET checked_out_at = now() WHERE id = $1
-  `, [checkin.id]);
+  `,
+    [checkin.id]
+  );
 
   // NON tocchiamo né il set Redis "già entrato in questa sessione"
   // né il contatore soglia (checkin_count): quel dato serve solo a
@@ -359,11 +389,11 @@ async function evaluateLocationPing({ userId, arenaSessionId, latitude, longitud
  * ============================================================
  */
 const VIRTUAL_VENUE_DEFAULTS = {
-  nightclub:    { openTime: '22:00:00', closeTime: '06:00:00', checkinThreshold: 20 },
-  ristorante:   { openTime: '19:00:00', closeTime: '24:00:00', checkinThreshold: 15 },
-  palestra:     { openTime: '06:00:00', closeTime: '24:00:00', checkinThreshold: 10 },
+  nightclub: { openTime: '22:00:00', closeTime: '06:00:00', checkinThreshold: 20 },
+  ristorante: { openTime: '19:00:00', closeTime: '24:00:00', checkinThreshold: 15 },
+  palestra: { openTime: '06:00:00', closeTime: '24:00:00', checkinThreshold: 10 },
   cocktail_bar: { openTime: '17:00:00', closeTime: '22:00:00', checkinThreshold: 15 },
-  retail:       { openTime: '09:00:00', closeTime: '20:00:00', checkinThreshold: 10 },
+  retail: { openTime: '09:00:00', closeTime: '20:00:00', checkinThreshold: 10 },
 };
 
 async function createVirtualVenue({ name, area, latitude, longitude, venueType, minUsersForLocalRanking }, { db }) {
@@ -378,15 +408,27 @@ async function createVirtualVenue({ name, area, latitude, longitude, venueType, 
   // crea il locale non ufficiale non la specifica, usiamo lo stesso
   // valore di default della colonna (5), risolto qui in JavaScript
   // perché DEFAULT non è utilizzabile dentro un COALESCE in SQL.
-  const minUsers = Number.isInteger(minUsersForLocalRanking) && minUsersForLocalRanking >= 1
-    ? minUsersForLocalRanking
-    : 5;
+  const minUsers =
+    Number.isInteger(minUsersForLocalRanking) && minUsersForLocalRanking >= 1 ? minUsersForLocalRanking : 5;
 
-  const venue = await db.query(`
+  const venue = await db.query(
+    `
     INSERT INTO venues (name, area, latitude, longitude, checkin_threshold, is_partner, venue_type, default_open_time, default_close_time, min_users_for_local_ranking)
     VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8, $9)
     RETURNING id
-  `, [name.trim(), area || null, latitude, longitude, defaults.checkinThreshold, venueType, defaults.openTime, defaults.closeTime, minUsers]);
+  `,
+    [
+      name.trim(),
+      area || null,
+      latitude,
+      longitude,
+      defaults.checkinThreshold,
+      venueType,
+      defaults.openTime,
+      defaults.closeTime,
+      minUsers,
+    ]
+  );
 
   return { success: true, venueId: venue.id };
 }
@@ -461,18 +503,20 @@ async function getAllVenuesForMap({}, { db }) {
       // lo ha fatto, il frontend semplicemente non mostra questa
       // parte (sharedTotal = 0 lo segnala chiaramente), stessa
       // regola già usata in "Esplora".
-      genderStats: sharedTotal > 0 ? {
-        sharedTotal,
-        malePct: Math.round((male / sharedTotal) * 100),
-        femalePct: Math.round((female / sharedTotal) * 100),
-        otherPct: Math.round((other / sharedTotal) * 100),
-      } : null,
+      genderStats:
+        sharedTotal > 0
+          ? {
+              sharedTotal,
+              malePct: Math.round((male / sharedTotal) * 100),
+              femalePct: Math.round((female / sharedTotal) * 100),
+              otherPct: Math.round((other / sharedTotal) * 100),
+            }
+          : null,
     };
   });
 }
 
 module.exports = { handleCheckin, createVirtualVenue, getAllVenuesForMap, evaluateLocationPing };
-
 
 /**
  * ============================================================
@@ -485,7 +529,6 @@ module.exports = { handleCheckin, createVirtualVenue, getAllVenuesForMap, evalua
 function logInternalAlert(type, context) {
   console.error(`[ALERT] ${type}`, context);
 }
-
 
 /**
  * ============================================================

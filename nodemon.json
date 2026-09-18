@@ -1,0 +1,12 @@
+{
+  "watch": ["*.js", ".env.dev"],
+  "ext": "js,json,env",
+  "ignore": ["node_modules/", "scripts/"],
+  "execMap": { "js": "node --env-file=.env.dev" },
+  "script": "populive-api-server.js",
+  "delay": 300,
+  "events": {
+    "restart": "echo [nodemon] modifica rilevata, riavvio il server...",
+    "crash": "echo [nodemon] il server e' crashato: correggi il file e verra' riavviato da solo"
+  }
+}

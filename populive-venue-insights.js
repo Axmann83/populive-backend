@@ -18,13 +18,13 @@
 
 const MIN_SAMPLE_SIZE = 10;
 
-
 /**
  * Distribuzione oraria degli arrivi — utile al locale per capire
  * quando davvero si riempie (spesso diverso da quando "dovrebbe").
  */
 async function getArrivalTimeDistribution({ venueId, fromDate, toDate }, { db }) {
-  const rows = await db.query(`
+  const rows = await db.query(
+    `
     SELECT EXTRACT(HOUR FROM checked_in_at) AS hour, COUNT(*) AS arrivals
     FROM checkins
     JOIN arena_sessions ON arena_sessions.id = checkins.arena_session_id
@@ -32,7 +32,9 @@ async function getArrivalTimeDistribution({ venueId, fromDate, toDate }, { db })
       AND arena_sessions.session_date BETWEEN $2 AND $3
     GROUP BY hour
     ORDER BY hour
-  `, [venueId, fromDate, toDate]);
+  `,
+    [venueId, fromDate, toDate]
+  );
 
   const totalSample = rows.reduce((sum, r) => sum + parseInt(r.arrivals), 0);
   if (totalSample < MIN_SAMPLE_SIZE) {
@@ -42,7 +44,6 @@ async function getArrivalTimeDistribution({ venueId, fromDate, toDate }, { db })
   return { available: true, distribution: rows, totalSample };
 }
 
-
 /**
  * Permanenza media (quanto tempo restano, in media, gli utenti) —
  * calcolata solo sui check-in che hanno un checked_out_at valido
@@ -51,7 +52,8 @@ async function getArrivalTimeDistribution({ venueId, fromDate, toDate }, { db })
  * corretto, che uno gonfiato da stime sbagliate).
  */
 async function getAverageDwellTime({ venueId, fromDate, toDate }, { db }) {
-  const result = await db.query(`
+  const result = await db.query(
+    `
     SELECT
       COUNT(*) AS sample_size,
       AVG(EXTRACT(EPOCH FROM (checked_out_at - checked_in_at)) / 60) AS avg_minutes
@@ -60,7 +62,9 @@ async function getAverageDwellTime({ venueId, fromDate, toDate }, { db }) {
     WHERE arena_sessions.venue_id = $1
       AND arena_sessions.session_date BETWEEN $2 AND $3
       AND checked_out_at IS NOT NULL
-  `, [venueId, fromDate, toDate]);
+  `,
+    [venueId, fromDate, toDate]
+  );
 
   if (result.sample_size < MIN_SAMPLE_SIZE) {
     return { available: false, reason: 'sample_too_small', minRequired: MIN_SAMPLE_SIZE };
@@ -68,7 +72,6 @@ async function getAverageDwellTime({ venueId, fromDate, toDate }, { db }) {
 
   return { available: true, avgMinutes: Math.round(result.avg_minutes), sampleSize: result.sample_size };
 }
-
 
 /**
  * Bevande più richieste — dai dati delle Pulse riscattate.
@@ -78,7 +81,8 @@ async function getAverageDwellTime({ venueId, fromDate, toDate }, { db }) {
  * si beve qui", ma come "tendenza tra chi usa PopuLive".
  */
 async function getPopularDrinks({ venueId, fromDate, toDate }, { db }) {
-  const rows = await db.query(`
+  const rows = await db.query(
+    `
     SELECT pulses.drink_type, COUNT(*) AS redemptions
     FROM pulses
     JOIN arena_sessions ON arena_sessions.id = pulses.arena_session_id
@@ -87,7 +91,9 @@ async function getPopularDrinks({ venueId, fromDate, toDate }, { db }) {
       AND pulses.status = 'redeemed'
     GROUP BY pulses.drink_type
     ORDER BY redemptions DESC
-  `, [venueId, fromDate, toDate]);
+  `,
+    [venueId, fromDate, toDate]
+  );
 
   const totalSample = rows.reduce((sum, r) => sum + parseInt(r.redemptions), 0);
   if (totalSample < MIN_SAMPLE_SIZE) {
@@ -96,7 +102,6 @@ async function getPopularDrinks({ venueId, fromDate, toDate }, { db }) {
 
   return { available: true, drinks: rows, totalSample };
 }
-
 
 /**
  * Rapporto uomini/donne e affluenza serale nel tempo — la prima
@@ -107,7 +112,8 @@ async function getPopularDrinks({ venueId, fromDate, toDate }, { db }) {
  * locali" lato utente.
  */
 async function getAttendanceTrend({ venueId, fromDate, toDate }, { db }) {
-  const rows = await db.query(`
+  const rows = await db.query(
+    `
     SELECT
       arena_sessions.session_date,
       COUNT(DISTINCT checkins.user_id) AS attendees,
@@ -121,14 +127,15 @@ async function getAttendanceTrend({ venueId, fromDate, toDate }, { db }) {
       AND arena_sessions.session_date BETWEEN $2 AND $3
     GROUP BY arena_sessions.session_date
     ORDER BY arena_sessions.session_date
-  `, [venueId, fromDate, toDate]);
+  `,
+    [venueId, fromDate, toDate]
+  );
 
   return { available: true, trend: rows };
   // Nota: qui NON applichiamo la soglia minima campione perché il
   // dato è già "quante persone in totale quella sera", non
   // scomponibile per singolo individuo — resta aggregato di per sé.
 }
-
 
 /**
  * Report completo, pensato per essere mostrato al proprietario del
@@ -146,9 +153,17 @@ async function generateVenueReport({ venueId, fromDate, toDate }, { db }) {
     getPeakConcurrentAttendance({ venueId, fromDate, toDate }, { db }),
   ]);
 
-  return { arrivals, dwellTime, drinks, attendance, socialInteractions, returnRate, peakAttendance, generatedAt: new Date() };
+  return {
+    arrivals,
+    dwellTime,
+    drinks,
+    attendance,
+    socialInteractions,
+    returnRate,
+    peakAttendance,
+    generatedAt: new Date(),
+  };
 }
-
 
 /**
  * ============================================================
@@ -165,7 +180,8 @@ async function generateVenueReport({ venueId, fromDate, toDate }, { db }) {
  * ============================================================
  */
 async function getPopularVenuesNow({ limit = 10 }, { db }) {
-  const rows = await db.queryAll(`
+  const rows = await db.queryAll(
+    `
     SELECT
       v.id, v.name, v.category,
       COUNT(c.id) AS checkin_count,
@@ -187,7 +203,9 @@ async function getPopularVenuesNow({ limit = 10 }, { db }) {
     HAVING COUNT(c.id) > 0
     ORDER BY checkin_count DESC
     LIMIT $1
-  `, [limit]);
+  `,
+    [limit]
+  );
 
   return rows.map((r) => {
     const male = parseInt(r.male_count) || 0;
@@ -204,16 +222,18 @@ async function getPopularVenuesNow({ limit = 10 }, { db }) {
       // Percentuali calcolate SOLO su chi ha condiviso — se nessuno
       // lo ha fatto, il frontend semplicemente non mostra questa
       // parte (sharedTotal = 0 lo segnala chiaramente).
-      genderStats: sharedTotal > 0 ? {
-        sharedTotal,
-        malePct: Math.round((male / sharedTotal) * 100),
-        femalePct: Math.round((female / sharedTotal) * 100),
-        otherPct: Math.round((other / sharedTotal) * 100),
-      } : null,
+      genderStats:
+        sharedTotal > 0
+          ? {
+              sharedTotal,
+              malePct: Math.round((male / sharedTotal) * 100),
+              femalePct: Math.round((female / sharedTotal) * 100),
+              otherPct: Math.round((other / sharedTotal) * 100),
+            }
+          : null,
     };
   });
 }
-
 
 /**
  * ============================================================
@@ -232,7 +252,8 @@ async function getPopularVenuesNow({ limit = 10 }, { db }) {
 const HISTORICAL_BOARD_DAYS = 7;
 
 async function getVenueHistoricalCheckins({ venueId, requesterId }, { db }) {
-  const rows = await db.queryAll(`
+  const rows = await db.queryAll(
+    `
     SELECT DISTINCT ON (u.id)
       u.id, u.display_name, u.photo_url, u.avatar_emoji, c.checked_in_at
     FROM checkins c
@@ -248,7 +269,9 @@ async function getVenueHistoricalCheckins({ venueId, requesterId }, { db }) {
            OR (blocker_id = u.id AND blocked_id = $2)
       )
     ORDER BY u.id, c.checked_in_at DESC
-  `, [venueId, requesterId]);
+  `,
+    [venueId, requesterId]
+  );
 
   return rows
     .sort((a, b) => new Date(b.checked_in_at) - new Date(a.checked_in_at))
@@ -261,7 +284,6 @@ async function getVenueHistoricalCheckins({ venueId, requesterId }, { db }) {
     }));
 }
 
-
 /**
  * Interazioni sociali generate nel locale — quanti Like/Superlike
  * sono stati scambiati lì dentro. Un argomento di vendita che
@@ -269,7 +291,8 @@ async function getVenueHistoricalCheckins({ venueId, requesterId }, { db }) {
  * sono venute", ma "quante connessioni vere sono nate qui".
  */
 async function getSocialInteractionsCount({ venueId, fromDate, toDate }, { db }) {
-  const result = await db.query(`
+  const result = await db.query(
+    `
     SELECT
       COUNT(*) AS total,
       COUNT(*) FILTER (WHERE type = 'like') AS likes,
@@ -278,7 +301,9 @@ async function getSocialInteractionsCount({ venueId, fromDate, toDate }, { db })
     JOIN arena_sessions ON arena_sessions.id = interactions.arena_session_id
     WHERE arena_sessions.venue_id = $1
       AND arena_sessions.session_date BETWEEN $2 AND $3
-  `, [venueId, fromDate, toDate]);
+  `,
+    [venueId, fromDate, toDate]
+  );
 
   const total = parseInt(result.total) || 0;
   if (total < MIN_SAMPLE_SIZE) {
@@ -293,7 +318,6 @@ async function getSocialInteractionsCount({ venueId, fromDate, toDate }, { db })
   };
 }
 
-
 /**
  * Tasso di ritorno — quante persone sono tornate almeno una
  * seconda volta nell'intervallo considerato. Segnale forte di
@@ -301,7 +325,8 @@ async function getSocialInteractionsCount({ venueId, fromDate, toDate }, { db })
  * numero grezzo di presenze.
  */
 async function getReturnRate({ venueId, fromDate, toDate }, { db }) {
-  const result = await db.query(`
+  const result = await db.query(
+    `
     SELECT
       COUNT(*) AS total_visitors,
       COUNT(*) FILTER (WHERE visit_count > 1) AS returning_visitors
@@ -313,7 +338,9 @@ async function getReturnRate({ venueId, fromDate, toDate }, { db }) {
         AND arena_sessions.session_date BETWEEN $2 AND $3
       GROUP BY checkins.user_id
     ) visits
-  `, [venueId, fromDate, toDate]);
+  `,
+    [venueId, fromDate, toDate]
+  );
 
   const totalVisitors = parseInt(result.total_visitors) || 0;
   if (totalVisitors < MIN_SAMPLE_SIZE) {
@@ -329,7 +356,6 @@ async function getReturnRate({ venueId, fromDate, toDate }, { db }) {
   };
 }
 
-
 /**
  * Picco di presenze simultanee — non il totale della serata, ma
  * il momento esatto di massimo affollamento. Approssimato con
@@ -339,7 +365,8 @@ async function getReturnRate({ venueId, fromDate, toDate }, { db }) {
  * quando davvero un locale "esplode".
  */
 async function getPeakConcurrentAttendance({ venueId, fromDate, toDate }, { db }) {
-  const rows = await db.query(`
+  const rows = await db.query(
+    `
     WITH hourly_snapshots AS (
       SELECT
         a.session_date,
@@ -363,7 +390,9 @@ async function getPeakConcurrentAttendance({ venueId, fromDate, toDate }, { db }
     FROM hourly_snapshots
     GROUP BY session_date
     ORDER BY session_date
-  `, [venueId, fromDate, toDate]);
+  `,
+    [venueId, fromDate, toDate]
+  );
 
   if (rows.length === 0) {
     return { available: false, reason: 'sample_too_small', minRequired: MIN_SAMPLE_SIZE };
@@ -375,7 +404,6 @@ async function getPeakConcurrentAttendance({ venueId, fromDate, toDate }, { db }
 
   return { available: true, allTimeHigh, avgPeakPerNight: avgPeak, nightlyPeaks: rows };
 }
-
 
 /**
  * Report commissioni per locale — quante Pulse sono state
@@ -430,18 +458,24 @@ async function getCommissionsReport({}, { db }) {
  * su un locale alla volta invece che mostrarli tutti insieme.
  */
 async function getVenueFullSettings({ venueId }, { db }) {
-  const v = await db.query(`
+  const v = await db.query(
+    `
     SELECT id, name, commission_venue_pct, pulse_price_cents, pulse_bundle_5_price_cents,
            spending_threshold_cents, spending_bonus_points, default_open_time, default_close_time,
            venue_type, is_partner, min_users_for_local_ranking
     FROM venues WHERE id = $1
-  `, [venueId]);
+  `,
+    [venueId]
+  );
 
   if (!v) return { success: false, reason: 'venue_not_found' };
 
-  const redeemed = await db.query(`
+  const redeemed = await db.query(
+    `
     SELECT COUNT(*) AS count FROM pulses WHERE redeemed_venue_id = $1 AND status = 'redeemed'
-  `, [venueId]);
+  `,
+    [venueId]
+  );
   const redeemedCount = parseInt(redeemed?.count) || 0;
   const venueOwedCents = Math.round(redeemedCount * (v.pulse_price_cents || 0) * (v.commission_venue_pct / 100));
 
@@ -466,7 +500,6 @@ async function getVenueFullSettings({ venueId }, { db }) {
   };
 }
 
-
 /**
  * ============================================================
  * CATALOGO DRINK PER LOCALE — GESTIONE DA DASHBOARD
@@ -482,13 +515,16 @@ async function getVenueFullSettings({ venueId }, { db }) {
  */
 
 async function getVenueDrinks({ venueId }, { db }) {
-  const rows = await db.queryAll(`
+  const rows = await db.queryAll(
+    `
     SELECT dp.id, dp.name, dp.base_price_cents, dp.is_active
     FROM venue_drink_catalog vdc
     JOIN drink_products dp ON dp.id = vdc.drink_product_id
     WHERE vdc.venue_id = $1
     ORDER BY dp.created_at ASC
-  `, [venueId]);
+  `,
+    [venueId]
+  );
 
   return rows.map((r) => ({
     id: r.id,
@@ -504,16 +540,22 @@ async function addVenueDrink({ venueId, name, basePriceCents }, { db }) {
     return { success: false, reason: 'invalid_price' };
   }
 
-  const drink = await db.query(`
+  const drink = await db.query(
+    `
     INSERT INTO drink_products (name, base_price_cents, is_active)
     VALUES ($1, $2, true)
     RETURNING id
-  `, [name.trim(), basePriceCents]);
+  `,
+    [name.trim(), basePriceCents]
+  );
 
-  await db.query(`
+  await db.query(
+    `
     INSERT INTO venue_drink_catalog (venue_id, drink_product_id)
     VALUES ($1, $2)
-  `, [venueId, drink.id]);
+  `,
+    [venueId, drink.id]
+  );
 
   return { success: true, drinkId: drink.id };
 }
@@ -524,9 +566,12 @@ async function updateVenueDrink({ drinkProductId, name, basePriceCents }, { db }
     return { success: false, reason: 'invalid_price' };
   }
 
-  await db.query(`
+  await db.query(
+    `
     UPDATE drink_products SET name = $1, base_price_cents = $2 WHERE id = $3
-  `, [name.trim(), basePriceCents, drinkProductId]);
+  `,
+    [name.trim(), basePriceCents, drinkProductId]
+  );
 
   return { success: true };
 }
@@ -536,7 +581,10 @@ async function removeVenueDrink({ venueId, drinkProductId }, { db }) {
   // eliminazione automatica a cascata su questa tabella, quindi
   // l'ordine conta (il vincolo di chiave esterna rifiuterebbe la
   // seconda riga se restasse ancora agganciata).
-  await db.query(`DELETE FROM venue_drink_catalog WHERE venue_id = $1 AND drink_product_id = $2`, [venueId, drinkProductId]);
+  await db.query(`DELETE FROM venue_drink_catalog WHERE venue_id = $1 AND drink_product_id = $2`, [
+    venueId,
+    drinkProductId,
+  ]);
   await db.query(`DELETE FROM drink_products WHERE id = $1`, [drinkProductId]);
   return { success: true };
 }

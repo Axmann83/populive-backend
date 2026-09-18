@@ -29,10 +29,25 @@ const jwt = require('jsonwebtoken');
 const twilio = require('twilio');
 
 const JWT_EXPIRY = '30d'; // sessione lunga: un'app di nightlife non deve chiedere
-                           // di rifare login ogni pochi giorni
+// di rifare login ogni pochi giorni
 
 function getTwilioClient() {
   return twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+}
+
+/**
+ * SOLO SVILUPPO LOCALE — con DEV_OTP_BYPASS=true nel .env non si
+ * parla con Twilio: nessun SMS parte e qualunque numero entra con
+ * il codice APP_REVIEW_TEST_OTP_CODE. Disattivato per costruzione
+ * in produzione (NODE_ENV=production lo ignora sempre), così non
+ * può finire acceso per sbaglio su un server vero.
+ */
+function isDevOtpBypassEnabled() {
+  return (
+    process.env.DEV_OTP_BYPASS === 'true' &&
+    process.env.NODE_ENV !== 'production' &&
+    !!process.env.APP_REVIEW_TEST_OTP_CODE
+  );
 }
 
 /**
@@ -41,7 +56,7 @@ function getTwilioClient() {
  * utilizzabile anche in prova). Non creiamo ancora nessun utente
  * qui: quello avviene solo dopo la verifica.
  */
-async function requestOtp({ phoneNumber }, { db }) {
+async function requestOtp({ phoneNumber }) {
   const normalizedPhone = normalizePhoneNumber(phoneNumber);
   if (!normalizedPhone) return { success: false, reason: 'invalid_phone_number' };
 
@@ -60,11 +75,16 @@ async function requestOtp({ phoneNumber }, { db }) {
     verificationParams.customCode = process.env.APP_REVIEW_TEST_OTP_CODE;
   }
 
+  if (isDevOtpBypassEnabled()) {
+    console.info(
+      `[auth] DEV_OTP_BYPASS attivo — nessun SMS a ${normalizedPhone}, usa il codice ${process.env.APP_REVIEW_TEST_OTP_CODE}`
+    );
+    return { success: true };
+  }
+
   try {
     const client = getTwilioClient();
-    await client.verify.v2
-      .services(process.env.TWILIO_VERIFY_SERVICE_SID)
-      .verifications.create(verificationParams);
+    await client.verify.v2.services(process.env.TWILIO_VERIFY_SERVICE_SID).verifications.create(verificationParams);
   } catch (err) {
     console.error('[auth] invio SMS fallito:', err);
     // Per il numero di test dei revisori, NON blocchiamo qui — il
@@ -105,31 +125,35 @@ async function verifyOtp({ phoneNumber, code }, { db }) {
   if (!normalizedPhone) return { success: false, reason: 'invalid_phone_number' };
 
   let check;
-  try {
-    const auth = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
-    const body = new URLSearchParams({ To: normalizedPhone, Code: code });
+  if (isDevOtpBypassEnabled()) {
+    // Nessuna chiamata a Twilio: il codice giusto è quello nel .env
+    check = { status: code === process.env.APP_REVIEW_TEST_OTP_CODE ? 'approved' : 'pending' };
+  } else
+    try {
+      const auth = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
+      const body = new URLSearchParams({ To: normalizedPhone, Code: code });
 
-    const res = await fetch(
-      `https://verify.twilio.com/v2/Services/${process.env.TWILIO_VERIFY_SERVICE_SID}/VerificationCheck`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Basic ${auth}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: body.toString(),
+      const res = await fetch(
+        `https://verify.twilio.com/v2/Services/${process.env.TWILIO_VERIFY_SERVICE_SID}/VerificationCheck`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Basic ${auth}`,
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: body.toString(),
+        }
+      );
+      check = await res.json();
+
+      if (!res.ok) {
+        console.error('[auth] verifica codice fallita (risposta Twilio):', check);
+        return { success: false, reason: 'verification_failed' };
       }
-    );
-    check = await res.json();
-
-    if (!res.ok) {
-      console.error('[auth] verifica codice fallita (risposta Twilio):', check);
+    } catch (err) {
+      console.error('[auth] verifica codice fallita:', err);
       return { success: false, reason: 'verification_failed' };
     }
-  } catch (err) {
-    console.error('[auth] verifica codice fallita:', err);
-    return { success: false, reason: 'verification_failed' };
-  }
 
   if (check.status !== 'approved') {
     return { success: false, reason: 'wrong_code' };
@@ -144,11 +168,14 @@ async function verifyOtp({ phoneNumber, code }, { db }) {
   let isNewUser = false;
   if (!user) {
     isNewUser = true;
-    user = await db.query(`
+    user = await db.query(
+      `
       INSERT INTO users (phone_number)
       VALUES ($1)
       RETURNING id, onboarding_completed
-    `, [normalizedPhone]);
+    `,
+      [normalizedPhone]
+    );
   }
 
   const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: JWT_EXPIRY });
@@ -237,7 +264,8 @@ function normalizePhoneNumber(raw) {
  * ============================================================
  */
 async function deleteAccount({ userId }, { db }) {
-  await db.query(`
+  await db.query(
+    `
     UPDATE users SET
       deleted_at = now(),
       display_name = 'Utente eliminato',
@@ -250,14 +278,19 @@ async function deleteAccount({ userId }, { db }) {
       sponsored_missions_enabled = false,
       appears_in_historical_search = false
     WHERE id = $1
-  `, [userId]);
+  `,
+    [userId]
+  );
 
   await db.query(`DELETE FROM user_hashtags WHERE user_id = $1`, [userId]);
 
-  await db.query(`
+  await db.query(
+    `
     UPDATE chat_messages SET body = '[messaggio eliminato]'
     WHERE sender_id = $1
-  `, [userId]);
+  `,
+    [userId]
+  );
 
   return { success: true };
 }
