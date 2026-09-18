@@ -23,6 +23,16 @@ const BASE_POINTS = {
   pulse_super:               20,   // il valore più alto tra tutte le interazioni dirette, apposta — è l'unica garantita al 100% (nessun minigioco, nessuna fortuna) e richiede una risorsa vera in più (il Superlike). Margine modesto sopra al tetto massimo teorico del Pulse+Like con match riuscito (17).
   mission_completed:        15,   // missione sponsorizzata da brand
   connector_discovery_bonus: 18,  // Top Connector: bonus per aver "scoperto" un profilo che poi esplode
+  // Top Connector — bonus "talent scout" di fine serata (17/9, idea
+  // dell'utente): quando l'Arena chiude, i Connector dei tre TAVOLI
+  // DIVERSI con dentro la persona più popolare della serata prendono
+  // questo bonus decrescente — un solo bonus a testa, mai due allo
+  // stesso Connector nella stessa sera anche se ha in squadra sia il
+  // 1° che il 4° più popolare. Valori INDICATIVI, da tarare con le
+  // serate vere come tutto il resto di questa tabella.
+  connector_top_talent_1:   30,   // tavolo con la persona più popolare della serata
+  connector_top_talent_2:   20,   // secondo tavolo più "in alto"
+  connector_top_talent_3:   10,   // terzo tavolo più "in alto"
 };
 
 // Punti a chi COMPIE l'azione (non solo a chi la riceve) — valori
