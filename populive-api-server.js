@@ -18,7 +18,7 @@ const { createDb } = require('./populive-db-adapter');
 const Redis = require('ioredis');
 
 const { setupWebSocket } = require('./populive-websocket-rooms');
-const { handleCheckin, createVirtualVenue, getAllVenuesForMap } = require('./populive-checkin-logic');
+const { handleCheckin, createVirtualVenue, getAllVenuesForMap, evaluateLocationPing } = require('./populive-checkin-logic');
 const {
   sendInteraction, trackProfileView, respondToPulse, attemptGuess, respondToSuperlike, getReceivedPulses, getSentPulses, getPulseBalance, getInteractionHistory, getUnseenNotificationCount, markNotificationsSeen, dismissNotification, clearAllNotifications, dismissPulseView, clearAllPulseViews, getPermanentlyBlockedPairUserIds, blockUserFromChat, getPendingReceivedInteractions, getSentInteractionsHistory, getUnseenLikeCenterCount, markLikeCenterSeen,
 } = require('./populive-interactions-logic');
@@ -252,6 +252,17 @@ app.post('/api/profile/:userId/onboarding', requireAuthOnly, ah(async (req, res)
 app.post('/api/checkin', requireOnboarded, ah(async (req, res) => {
   const { venueId } = req.body;
   const result = await handleCheckin({ userId: req.userId, venueId }, deps);
+  res.json(result);
+}));
+
+// Geofencing (18/9) — il telefono chiama questo endpoint quando
+// l'app torna in primo piano, mandando la posizione ATTUALE una
+// tantum (mai in background continuo). Se si è allontanato troppo
+// dal locale, il check-in decade da solo — vedi il commento in
+// populive-checkin-logic.js per il perché delle scelte fatte.
+app.post('/api/checkin/location-ping', requireOnboarded, ah(async (req, res) => {
+  const { arenaSessionId, latitude, longitude } = req.body;
+  const result = await evaluateLocationPing({ userId: req.userId, arenaSessionId, latitude, longitude }, deps);
   res.json(result);
 }));
 
