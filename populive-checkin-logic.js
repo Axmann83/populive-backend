@@ -16,6 +16,7 @@
  */
 
 const { refundPulseCredit, createIgnoredCooldownBlock } = require('./populive-interactions-logic');
+const { broadcastToOthers } = require('./populive-websocket-rooms');
 
 async function handleCheckin({ userId, venueId }, { db, redis, io }) {
 
@@ -244,7 +245,105 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
   };
 }
 
-module.exports = { handleCheckin };
+/**
+ * ============================================================
+ * DECADIMENTO DEL CHECK-IN PER DISTANZA (geofencing, 18/9)
+ * ============================================================
+ * Il telefono chiama questo endpoint quando l'app torna in primo
+ * piano (MAI in background continuo — niente permesso "sempre"
+ * dato al sistema operativo, niente consumo batteria extra, niente
+ * terzo consenso di posizione da aggiungere oltre a quello già
+ * usato per le missioni sponsorizzate). Se la distanza dal locale
+ * supera il raggio, il check-in decade da solo — stessa identica
+ * azione della disconnessione WebSocket qui sopra, solo innescata
+ * da un segnale diverso (distanza invece di "app chiusa").
+ *
+ * Di proposito NON salviamo MAI la posizione ricevuta da nessuna
+ * parte — stesso principio già scritto nello schema per questa
+ * tabella ("nessuna colonna GPS grezza, di proposito"): la
+ * calcoliamo al volo dentro la query e la buttiamo via, non
+ * diventa mai uno storico.
+ *
+ * Riusa la stessa formula di distanza (legge sferica dei coseni)
+ * già scritta per "missioni vicino a te" in
+ * populive-missions-logic.js, invece di inventarne una diversa.
+ * ============================================================
+ */
+const GEOFENCE_RADIUS_METERS = 200; // valore di partenza, uguale per tutti i locali — in
+                                     // futuro potrebbe diventare una colonna per-locale
+                                     // (un locale all'aperto molto grande potrebbe volerlo
+                                     // più largo di uno piccolo al chiuso)
+
+async function evaluateLocationPing({ userId, arenaSessionId, latitude, longitude }, { db, io }) {
+  if (typeof latitude !== 'number' || typeof longitude !== 'number') {
+    return { success: false, reason: 'invalid_coordinates' };
+  }
+
+  // Il check-in ancora "aperto" (mai chiuso) per questo utente in
+  // questa sessione — se non esiste, non c'è nulla da far decadere
+  // (o non è mai entrato, o è già uscito, es. via disconnessione).
+  const checkin = await db.query(`
+    SELECT
+      checkins.id,
+      venues.latitude AS venue_lat,
+      venues.longitude AS venue_lng,
+      6371000 * acos(LEAST(1, GREATEST(-1,
+        cos(radians($3)) * cos(radians(venues.latitude)) * cos(radians(venues.longitude) - radians($4)) +
+        sin(radians($3)) * sin(radians(venues.latitude))
+      ))) AS distance_meters
+    FROM checkins
+    JOIN arena_sessions ON arena_sessions.id = checkins.arena_session_id
+    JOIN venues ON venues.id = arena_sessions.venue_id
+    WHERE checkins.user_id = $1
+      AND checkins.arena_session_id = $2
+      AND checkins.checked_out_at IS NULL
+  `, [userId, arenaSessionId, latitude, longitude]);
+
+  if (!checkin) {
+    return { success: true, alreadyOut: true };
+  }
+
+  if (checkin.venue_lat === null || checkin.venue_lng === null) {
+    // Locale senza coordinate registrate (raro, ma possibile per un
+    // locale virtuale creato senza precisione) — meglio non decidere
+    // piuttosto che decidere alla cieca.
+    return { success: true, skipped: true, reason: 'venue_missing_coordinates' };
+  }
+
+  const distanceMeters = Math.round(checkin.distance_meters);
+
+  if (distanceMeters <= GEOFENCE_RADIUS_METERS) {
+    return { success: true, withinRange: true, distanceMeters };
+  }
+
+  // Oltre il raggio: il check-in decade davvero, stesso identico
+  // effetto della disconnessione WebSocket.
+  await db.query(`
+    UPDATE checkins SET checked_out_at = now() WHERE id = $1
+  `, [checkin.id]);
+
+  // NON tocchiamo né il set Redis "già entrato in questa sessione"
+  // né il contatore soglia (checkin_count): quel dato serve solo a
+  // non ricontare un secondo check-in nella stessa serata, resta
+  // valido a prescindere da quanto la persona si allontani e magari
+  // torni più tardi — coerente con "l'Arena non si disattiva mai
+  // una volta partita" già deciso altrove.
+  const ghostRow = await db.query(`SELECT ghost_mode_enabled FROM users WHERE id = $1`, [userId]);
+  const isGhost = !!ghostRow?.ghost_mode_enabled;
+
+  if (!isGhost) {
+    try {
+      broadcastToOthers(io, `arena_${arenaSessionId}`, userId, 'presence_update', {
+        type: 'left',
+        userId,
+      });
+    } catch (err) {
+      logInternalAlert('websocket_broadcast_failed_geofence', { userId, arenaSessionId, err });
+    }
+  }
+
+  return { success: true, checkedOut: true, distanceMeters };
+}
 
 /**
  * ============================================================
@@ -372,7 +471,7 @@ async function getAllVenuesForMap({}, { db }) {
   });
 }
 
-module.exports = { handleCheckin, createVirtualVenue, getAllVenuesForMap };
+module.exports = { handleCheckin, createVirtualVenue, getAllVenuesForMap, evaluateLocationPing };
 
 
 /**
