@@ -26,7 +26,7 @@ const { initiatePulsePurchase, initiatePurchase, initiateVenuePulseCreditsPurcha
 const { sendMessage, getMessages, setChatKeepPreference, getMyActiveConversations, markConversationRead, getUnreadChatCount, openAdminChat } = require('./populive-chat-logic');
 const { startScheduler } = require('./populive-scheduler');
 const {
-  createProfile, setProfilePhoto, updateProfileDetails, completeOnboarding, requireCompletedOnboarding, getPublicProfile,
+  createProfile, setProfilePhoto, setProfilePhotos, updateProfileDetails, completeOnboarding, requireCompletedOnboarding, getPublicProfile,
   findUserByPhone, setInstantInfluencerStatus,
 } = require('./populive-profile-onboarding');
 const { generateVenueReport, getPopularVenuesNow, getVenueHistoricalCheckins, getCommissionsReport, getVenueFullSettings, getVenueDrinks, addVenueDrink, updateVenueDrink, removeVenueDrink } = require('./populive-venue-insights');
@@ -197,6 +197,15 @@ app.post('/api/profile', requireAuthOnly, ah(async (req, res) => {
 
 app.post('/api/profile/:userId/photo', requireAuthOnly, ah(async (req, res) => {
   const result = await setProfilePhoto({ userId: req.userId, photoUrl: req.body.photoUrl }, { db });
+  res.json(result);
+}));
+
+// Galleria vera, fino a 6 foto (18/9) — il frontend manda sempre
+// l'elenco COMPLETO e già ordinato (gestisce da solo in locale
+// aggiunte/rimozioni/riordino prima di salvare), sostituisce quanto
+// c'era prima. SEMPRE req.userId dal token, mai il pezzo di indirizzo.
+app.post('/api/profile/:userId/photos', requireAuthOnly, ah(async (req, res) => {
+  const result = await setProfilePhotos({ userId: req.userId, photoUrls: req.body.photoUrls }, { db });
   res.json(result);
 }));
 
@@ -874,7 +883,7 @@ app.get('/api/profile/:userId/settings', requireOnboarded, ah(async (req, res) =
   const user = await db.query(`
     SELECT show_ranking_on_profile, sponsored_missions_enabled,
            appears_in_historical_search, receive_pulses_enabled, contact_filter,
-           ghost_mode_enabled, haptic_notifications_enabled, photo_url
+           ghost_mode_enabled, haptic_notifications_enabled, photo_url, photo_urls
     FROM users WHERE id = $1
   `, [req.userId]);
   if (!user) return res.json({ success: false, reason: 'user_not_found' });
@@ -890,6 +899,7 @@ app.get('/api/profile/:userId/settings', requireOnboarded, ah(async (req, res) =
       ghostModeEnabled: user.ghost_mode_enabled,
       hapticNotificationsEnabled: user.haptic_notifications_enabled,
       photoUrl: user.photo_url,
+      photoUrls: user.photo_urls || [],
     },
   });
 }));
