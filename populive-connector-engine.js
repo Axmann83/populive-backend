@@ -242,6 +242,66 @@ async function evaluatePendingDiscoveryMarkers({ db, io }) {
 }
 
 
+/**
+ * ============================================================
+ * BONUS "TALENT SCOUT" DI FINE SERATA (17/9, idea dell'utente)
+ * ============================================================
+ * Non è uno dei due motori del documento originale — è un TERZO
+ * bonus, pensato apposta per il pitch con i PR/locali: quando
+ * l'Arena chiude, i Connector dei TRE TAVOLI DIVERSI che hanno in
+ * squadra la persona più popolare della serata prendono un bonus
+ * decrescente (1°/2°/3° posto). "Tavoli diversi" per costruzione:
+ * per ogni Connector conta SOLO il suo membro più popolare, così uno
+ * stesso Connector non può vincere due volte solo perché in squadra
+ * ha sia il 1° che il 4° più popolare — libera il posto per il tavolo
+ * successivo davvero diverso.
+ *
+ * Va chiamata UNA VOLTA, quando l'Arena chiude per la notte (v.
+ * populive-scheduler.js, closeSessionIfOpen) — mai durante la serata,
+ * altrimenti "chi è il più popolare" cambierebbe in corsa e lo stesso
+ * Connector potrebbe incassare il bonus più volte.
+ * ============================================================
+ */
+const TOP_TALENT_BONUS_SOURCES = ['connector_top_talent_1', 'connector_top_talent_2', 'connector_top_talent_3'];
+
+async function awardTopTalentBonuses(arenaSessionId, { db, io }) {
+  if (!(await isTopConnectorEnabled({ db }))) return { awarded: 0 };
+
+  // Per ogni Connector, il punteggio del suo membro più popolare
+  // (DISTINCT ON connector_id, ordinato per punti) — poi i primi 3
+  // Connector per quel valore, in ordine.
+  const topThree = await db.queryAll(`
+    WITH member_points AS (
+      SELECT sm.connector_id, sm.member_id, COALESCE(SUM(pl.points), 0) AS points
+      FROM squad_memberships sm
+      LEFT JOIN points_ledger pl
+        ON pl.user_id = sm.member_id AND pl.arena_session_id = sm.arena_session_id AND pl.counts_toward_local = true
+      WHERE sm.arena_session_id = $1 AND sm.connector_id IS NOT NULL
+      GROUP BY sm.connector_id, sm.member_id
+    ),
+    best_per_connector AS (
+      SELECT DISTINCT ON (connector_id) connector_id, member_id, points
+      FROM member_points
+      ORDER BY connector_id, points DESC
+    )
+    SELECT connector_id, member_id, points
+    FROM best_per_connector
+    ORDER BY points DESC
+    LIMIT 3
+  `, [arenaSessionId]);
+
+  for (let i = 0; i < topThree.length; i++) {
+    await awardPoints({
+      receiverId: topThree[i].connector_id,
+      arenaSessionId,
+      source: TOP_TALENT_BONUS_SOURCES[i],
+    }, { db, io });
+  }
+
+  return { awarded: topThree.length };
+}
+
+
 // ------------------------------------------------------------
 // STATO CONNECTOR — sempre per singola sessione, mai permanente
 // ------------------------------------------------------------
@@ -405,6 +465,7 @@ module.exports = {
   reflectPointsToConnector,
   placeDiscoveryMarker,
   evaluatePendingDiscoveryMarkers,
+  awardTopTalentBonuses,
   getConnectorStatus,
   getSpenderStatus,
   awardTableSpendingBonus,
