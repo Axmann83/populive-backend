@@ -27,10 +27,10 @@ const { sendMessage, getMessages, setChatKeepPreference, getMyActiveConversation
 const { startScheduler } = require('./populive-scheduler');
 const {
   createProfile, setProfilePhoto, setProfilePhotos, updateProfileDetails, completeOnboarding, requireCompletedOnboarding, getPublicProfile,
-  findUserByPhone, setInstantInfluencerStatus,
+  findUserByPhone, setInstantInfluencerStatus, setProfessionalConnectorStatus,
 } = require('./populive-profile-onboarding');
 const { generateVenueReport, getPopularVenuesNow, getVenueHistoricalCheckins, getCommissionsReport, getVenueFullSettings, getVenueDrinks, addVenueDrink, updateVenueDrink, removeVenueDrink } = require('./populive-venue-insights');
-const { joinSquad, awardTableSpendingBonusByVenue, updateVenueSpendingConfig } = require('./populive-connector-engine');
+const { joinSquad, awardTableSpendingBonusByVenue, updateVenueSpendingConfig, claimTableAsProfessionalConnector, setTableLock } = require('./populive-connector-engine');
 const { getLocalRanking, getGlobalRanking, getUserRankingSummary, getWelcomeBackSummary, searchUsersByHashtag, checkLocalRankingThreshold } = require('./populive-ranking-queries');
 const { createMission, getAllMissions, getMissionsNearUser, completeMission, getMissionPreview } = require('./populive-missions-logic');
 const { requestOtp, verifyOtp, verifyToken, deleteAccount } = require('./populive-auth-logic');
@@ -181,6 +181,15 @@ app.get('/api/auth/me', requireAuthOnly, ah(async (req, res) => {
 app.get('/api/auth/is-architect', requireAuthOnly, ah(async (req, res) => {
   const architect = await db.query(`SELECT user_id FROM architects WHERE user_id = $1`, [req.userId]);
   res.json({ success: true, isArchitect: !!architect });
+}));
+
+// PR professionista (19/9) — usato da CheckinRadar.jsx per decidere
+// se mostrare il bottone "Sono il PR di questo tavolo". Flag mai
+// auto-attivabile, settata solo da dashboard (v. endpoint dedicato
+// più sotto).
+app.get('/api/auth/is-professional-connector', requireAuthOnly, ah(async (req, res) => {
+  const user = await db.query(`SELECT is_professional_connector FROM users WHERE id = $1`, [req.userId]);
+  res.json({ success: true, isProfessionalConnector: !!(user && user.is_professional_connector) });
 }));
 
 
@@ -408,6 +417,19 @@ app.post('/api/dashboard/users/:userId/instant-influencer', requireArchitect, ah
   res.json(result);
 }));
 
+// PR professionista (19/9) — unico modo per attivarla, mai
+// auto-attivabile dall'utente stesso (v. ProfessionalConnectorSection
+// in Dashboard.jsx, stesso pattern di ricerca per telefono già usato
+// per Instant Influencer qui sopra).
+app.post('/api/dashboard/users/:userId/professional-connector', requireArchitect, ah(async (req, res) => {
+  const { isProfessionalConnector } = req.body;
+  const result = await setProfessionalConnectorStatus({
+    userId: req.params.userId,
+    isProfessionalConnector: !!isProfessionalConnector,
+  }, { db });
+  res.json(result);
+}));
+
 // Messaggio diretto degli Architetti dalla classifica, senza match
 // (26/8) — endpoint SOLO dashboard, mai richiamato dall'app normale;
 // la vera sicurezza sta nel middleware requireArchitect, non nel
@@ -574,6 +596,33 @@ app.post('/api/table/join', requireOnboarded, ah(async (req, res) => {
     arenaSessionId,
     tableQrCode,
     wantsToBeConnector,
+  }, deps);
+  res.json(result);
+}));
+
+// PR professionista che gestisce più tavoli (19/9) — si dichiara
+// Connector di UN tavolo senza diventarne membro (v.
+// claimTableAsProfessionalConnector in populive-connector-engine.js).
+// Riservato a chi ha is_professional_connector = true.
+app.post('/api/table/claim-as-professional', requireOnboarded, ah(async (req, res) => {
+  const { tableQrCode, arenaSessionId } = req.body;
+  const result = await claimTableAsProfessionalConnector({
+    connectorId: req.userId,
+    arenaSessionId,
+    tableQrCode,
+  }, { db });
+  res.json(result);
+}));
+
+// Chiudi/riapri un tavolo (19/9) — solo il suo Connector vero può
+// farlo, verificato dentro setTableLock.
+app.post('/api/table/lock', requireOnboarded, ah(async (req, res) => {
+  const { tableQrCode, arenaSessionId, locked } = req.body;
+  const result = await setTableLock({
+    requestingUserId: req.userId,
+    arenaSessionId,
+    tableQrCode,
+    locked: !!locked,
   }, deps);
   res.json(result);
 }));
