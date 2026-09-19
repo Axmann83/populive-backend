@@ -367,7 +367,7 @@ async function findUserByPhone({ phoneNumber }, { db }) {
   const normalized = cleaned.startsWith('+') ? cleaned : cleaned.startsWith('39') ? `+${cleaned}` : `+39${cleaned}`;
 
   const user = await db.query(`
-    SELECT id, display_name, photo_url, avatar_emoji, instant_influencer_category
+    SELECT id, display_name, photo_url, avatar_emoji, instant_influencer_category, is_professional_connector
     FROM users WHERE phone_number = $1
   `, [normalized]);
 
@@ -387,8 +387,24 @@ async function findUserByPhone({ phoneNumber }, { db }) {
       avatarEmoji: user.avatar_emoji || '🙂',
       instantInfluencerCategory: user.instant_influencer_category,
       products: productRows.map((p) => ({ name: p.product_name, url: p.product_url })),
+      // 19/9 — riusata dalla stessa ricerca per telefono anche per il
+      // toggle "PR professionista" in dashboard (v.
+      // ProfessionalConnectorSection in Dashboard.jsx), nessun nuovo
+      // endpoint di ricerca da mantenere.
+      isProfessionalConnector: !!user.is_professional_connector,
     },
   };
+}
+
+/**
+ * PR professionista (19/9) — flag booleana semplice, mai auto-
+ * attivabile: sblocca claimTableAsProfessionalConnector in
+ * populive-connector-engine.js (Connector di più tavoli nella stessa
+ * serata senza doversi sedere a nessuno di essi).
+ */
+async function setProfessionalConnectorStatus({ userId, isProfessionalConnector }, { db }) {
+  await db.query(`UPDATE users SET is_professional_connector = $1 WHERE id = $2`, [isProfessionalConnector, userId]);
+  return { success: true };
 }
 
 /**
@@ -428,4 +444,5 @@ module.exports = {
   getPublicProfile,
   findUserByPhone,
   setInstantInfluencerStatus,
+  setProfessionalConnectorStatus,
 };
