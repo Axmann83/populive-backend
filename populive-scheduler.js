@@ -222,6 +222,10 @@ async function closeSessionIfOpen(venue, { db, redis, io }) {
   try {
     await redis.del(`arena:${openSession.id}:radar`);
     await redis.del(`arena:${openSession.id}:checkin_count`);
+    // Blocco tavoli (19/9) — stesso principio: stato vivo, sparisce
+    // con la sessione, mai bisogno di sapere in anticipo quali tavoli
+    // erano stati chiusi durante la serata.
+    await redis.del(`arena:${openSession.id}:locked_tables`);
   } catch (err) {
     // Anche se Redis avesse un problema in questo istante, la
     // chiusura "ufficiale" in Postgres è già avvenuta — coerente
