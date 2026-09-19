@@ -16,7 +16,7 @@
  */
 
 const { closeConversationsForSession, purgeExpiredChatMessages } = require('./populive-chat-logic');
-const { evaluatePendingDiscoveryMarkers, awardTopTalentBonuses } = require('./populive-connector-engine');
+const { evaluatePendingDiscoveryMarkers, awardTopTalentBonuses, awardTopTableActivityBonuses } = require('./populive-connector-engine');
 const { refundAbandonedPulsesForSession } = require('./populive-interactions-logic');
 
 const TICK_INTERVAL_MS = 5 * 60 * 1000; // ogni 5 minuti — abbastanza spesso da non far
@@ -204,6 +204,17 @@ async function closeSessionIfOpen(venue, { db, redis, io }) {
     await awardTopTalentBonuses(openSession.id, { db, io });
   } catch (err) {
     console.error(`[scheduler] errore nel bonus talent scout per sessione ${openSession.id}:`, err);
+  }
+
+  // Bonus "tavolo più attivo" di fine serata (19/9) — stesso identico
+  // momento del Talent Scout qui sopra, mai durante la serata. Diverso
+  // dal Talent Scout: premia la somma di TUTTO il tavolo, non il
+  // singolo membro più popolare, e si divide tra tutti i partecipanti
+  // invece di andare solo al Connector — v. populive-connector-engine.js.
+  try {
+    await awardTopTableActivityBonuses(openSession.id, { db, io });
+  } catch (err) {
+    console.error(`[scheduler] errore nel bonus tavolo più attivo per sessione ${openSession.id}:`, err);
   }
 
   // Pulizia dello stato "vivo" in Redis — il radar in tempo reale
