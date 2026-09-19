@@ -136,15 +136,37 @@ async function getGlobalRanking({ limit = 100, hashtag, gender }, { db }) {
       u.avatar_emoji,
       u.photo_url,
       COALESCE(gcp.capped_points, 0) AS global_points,
-      fb.user_id IS NOT NULL AS is_founder
+      fb.user_id IS NOT NULL AS is_founder,
+      COALESCE(tc.nights_won, 0) AS top_connector_nights_won
     FROM users u
     ${hashtagJoin}
     LEFT JOIN global_capped_points gcp ON gcp.user_id = u.id
     LEFT JOIN founder_bracelets fb ON fb.user_id = u.id
+    -- Badge Top Connector A VITA (19/9, idea dell'utente) — quante
+    -- serate ha chiuso da Top Connector in tutta la sua storia, MAI
+    -- punti (zero interazione col tetto di equità qui sopra), solo
+    -- un contatore da mostrare in classifica generale come credibilità
+    -- pubblica ("quanto è bravo questo PR"), anche quando il punteggio
+    -- resta tappato come chiunque altro. Derivato al volo da
+    -- connector_status (mai cancellata a fine serata, a differenza
+    -- del "vivo" in Redis) — nessuna nuova colonna/contatore da tenere
+    -- sincronizzato a mano.
+    LEFT JOIN (
+      SELECT user_id, COUNT(*) FILTER (WHERE is_top_connector = true) AS nights_won
+      FROM connector_status
+      GROUP BY user_id
+    ) tc ON tc.user_id = u.id
     ${whereClause}
     ORDER BY global_points DESC
     LIMIT $${paramIndex}
   `, params);
+
+  // Stesso interruttore di sempre — se il Top Connector è spento da
+  // dashboard, anche il badge a vita sparisce (coerente con tutto il
+  // resto: is_top_connector nelle righe passate non sarebbe comunque
+  // mai stato vero mentre l'interruttore era spento).
+  const topConnectorFlag = await db.query(`SELECT is_enabled FROM feature_flags WHERE feature_key = 'top_connector'`);
+  const topConnectorEnabled = topConnectorFlag ? topConnectorFlag.is_enabled : true;
 
   return rows.map((r, i) => ({
     rank: i + 1,
@@ -154,6 +176,7 @@ async function getGlobalRanking({ limit = 100, hashtag, gender }, { db }) {
     photoUrl: r.photo_url,
     points: parseInt(r.global_points),
     isFounder: r.is_founder,
+    topConnectorNightsWon: topConnectorEnabled ? parseInt(r.top_connector_nights_won) : 0,
   }));
 }
 
@@ -220,6 +243,21 @@ async function getUserRankingSummary({ userId, arenaSessionId, viewerId }, { db 
     SELECT COUNT(*) + 1 AS rank FROM global_capped_points WHERE capped_points > $1
   `, [globalPoints]);
 
+  // Badge Top Connector a vita (19/9) — stesso principio di
+  // getGlobalRanking qui sopra: derivato al volo, mai una colonna a
+  // parte, sempre coerente con l'interruttore "Top Connector" di
+  // dashboard.
+  const topConnectorFlag = await db.query(`SELECT is_enabled FROM feature_flags WHERE feature_key = 'top_connector'`);
+  const topConnectorEnabled = topConnectorFlag ? topConnectorFlag.is_enabled : true;
+  let topConnectorNightsWon = 0;
+  if (topConnectorEnabled) {
+    const nightsRow = await db.query(`
+      SELECT COUNT(*) FILTER (WHERE is_top_connector = true) AS nights_won
+      FROM connector_status WHERE user_id = $1
+    `, [userId]);
+    topConnectorNightsWon = parseInt(nightsRow?.nights_won) || 0;
+  }
+
   return {
     hidden: false,
     localRank: hasValidSession && localPoints > 0 ? parseInt(localRankRow.rank) : null,
@@ -229,6 +267,7 @@ async function getUserRankingSummary({ userId, arenaSessionId, viewerId }, { db 
     displayName,
     photoUrl,
     avatarEmoji,
+    topConnectorNightsWon,
   };
 }
 
