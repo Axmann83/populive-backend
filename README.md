@@ -72,7 +72,7 @@ Il server legge **solo** `process.env`: non apre nessun file di configurazione d
 
 - **Connessione locale:** `postgres://populive:populive@localhost:5432/populive` — Redis su `redis://localhost:6379` (definiti in `docker-compose.yml`).
 - **Schema:** `populive-db-schema.sql` è lo schema base (MVP). `db/migrations/*.sql` contiene le modifiche successive, applicate in ordine alfabetico una sola volta ciascuna (registro nella tabella `schema_migrations`). La migrazione `001` allinea lo schema base a tutto ciò che il codice usa oggi (tabelle `feature_flags`, `architects`, `sponsored_missions`… e le colonne aggiunte nel tempo).
-- **Aggiungere una modifica allo schema:** crea `db/migrations/002_<descrizione>.sql`, poi `npm run db:migrate`. Lancia `npm run db:validate` per verificare che codice e schema siano allineati.
+- **Aggiungere una modifica allo schema:** crea `db/migrations/004_<descrizione>.sql`, poi `npm run db:migrate`. Lancia `npm run db:validate` per verificare che codice e schema siano allineati.
 - **Dati di prova** (`db/seed-dev.sql`): tre locali a Roma, catalogo prodotti, hashtag, default per tipo di locale. Gli utenti non sono nel seed: si creano con il login.
 - **Dashboard admin:** gli endpoint `/api/dashboard/*` richiedono che l'utente sia nella tabella `architects`. Per promuovere il tuo utente locale:
 

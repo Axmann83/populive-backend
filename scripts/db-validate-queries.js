@@ -21,6 +21,7 @@ const path = require('path');
 const { Client } = require('pg');
 
 const ROOT = path.resolve(__dirname, '..');
+const rankingCap = require(path.join(ROOT, 'populive-ranking-cap.js'));
 // .env (segreti locali, opzionale) ha la precedenza su .env.dev
 loadDotEnv(path.join(ROOT, '.env'));
 loadDotEnv(path.join(ROOT, '.env.dev'));
@@ -37,6 +38,14 @@ function extractQueries() {
       // Non ne conosciamo il valore a questo punto: nei casi noti lo
       // sostituiamo con qualcosa di neutro, altrimenti lo togliamo.
       const sql = (m[2] ?? m[3] ?? m[4])
+        // ${localCappedPointsCte('$1')} / ${globalCappedPointsCte()}: CTE
+        // generate da populive-ranking-cap.js — le espandiamo davvero
+        .replace(/\$\{(local|global)CappedPointsCte\(([^)]*)\)\}/g, (_, kind, arg) =>
+          rankingCap[`${kind}CappedPointsCte`](arg.replace(/^['"]|['"]$/g, ''))
+        )
+        // ${BONUS_CAP_SOURCES_SQL}, ${BONUS_CAP_MULTIPLIER}...: costanti esportate
+        // dallo stesso modulo — sostituiamo il valore vero
+        .replace(/\$\{([A-Z_]+)\}/g, (whole, name) => (name in rankingCap ? String(rankingCap[name]) : whole))
         .replace(/SET\s+\$\{[^}]*\}\s*=/g, 'SET created_at =') // UPDATE t SET ${colonna} = ...
         .replace(/\$\{[^}]*\}\s+days/g, '1 days') // interval '${n} days'
         .replace(/\$\$\{[^}]*\}/g, '$1') // $${paramIndex} → parametro numerato dinamico
