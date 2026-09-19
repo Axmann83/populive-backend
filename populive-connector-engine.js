@@ -15,7 +15,8 @@
  * ============================================================
  */
 
-const { awardPoints } = require('./populive-points-engine');
+const { awardPoints, BASE_POINTS } = require('./populive-points-engine');
+const { ORGANIC_REFERENCE_SOURCES_SQL } = require('./populive-ranking-cap');
 
 const SQUAD_REFLECTION_SHARE = 0.15; // quanto dei punti di un membro si riflette al Connector
 const DISCOVERY_WINDOW_HOURS = 2;
@@ -92,9 +93,17 @@ async function isTopConnectorEnabled({ db }) {
 async function joinSquad({ connectorId, memberId, arenaSessionId, tableQrCode, wantsToBeConnector }, { db }) {
   if (connectorId === memberId) return { success: false, reason: 'cannot_join_own_squad' };
 
-  // Se questo tavolo ha già una squadra (qualcuno l'ha scansionato
-  // prima), riusiamo il suo connector_id — così ogni nuovo arrivato
-  // al tavolo eredita lo stesso collegamento, senza doverlo ridecidere.
+  // Se questo tavolo ha GIÀ un Connector confermato (qualcuno prima
+  // ha risposto sì), si eredita — nessuna nuova domanda per chi arriva
+  // dopo. MA se il tavolo esiste già senza un Connector (il primo
+  // arrivato ha detto no, o semplicemente nessuno l'ha ancora
+  // reclamato), il posto resta APERTO: chi arriva dopo può ancora
+  // dire sì e diventare Connector (19/9, corretto un limite del primo
+  // design — prima solo il PRIMISSIMO che scansionava aveva la
+  // possibilità di scegliere, una pura questione di chi tira fuori
+  // il telefono più in fretta, non di chi è davvero disposto a farlo).
+  // Chi lo reclama in un secondo momento "adotta" anche chi si era
+  // già agganciato prima di lui, aggiornando le loro righe.
   let resolvedConnectorId = connectorId;
   if (tableQrCode && resolvedConnectorId === undefined) {
     const existing = await db.query(`
@@ -103,18 +112,29 @@ async function joinSquad({ connectorId, memberId, arenaSessionId, tableQrCode, w
       LIMIT 1
     `, [arenaSessionId, tableQrCode]);
 
-    if (existing) {
-      // Tavolo già esistente: si eredita la scelta già fatta da chi
-      // ha aperto la sessione, nessuna nuova domanda per chi arriva dopo.
+    if (existing && existing.connector_id) {
       resolvedConnectorId = existing.connector_id;
     } else if (wantsToBeConnector) {
-      // Primo arrivo a questo tavolo, e ha risposto "sì" alla domanda
-      // "vuoi essere il Top Connector di questo gruppo?" — non serve
-      // essere GIÀ Top Connector: lo status vero (badge, voto x1.5)
-      // arriva più tardi se i punti accumulati bastano, questo è solo
-      // il momento in cui SCEGLIE di provarci.
+      // Nessuno ha ancora reclamato il ruolo per questo tavolo (primo
+      // arrivo in assoluto, oppure chi è arrivato prima ha detto no)
+      // — non serve essere GIÀ Top Connector: lo status vero (badge,
+      // voto x1.5) arriva più tardi se i punti accumulati bastano,
+      // questo è solo il momento in cui SCEGLIE di provarci.
       resolvedConnectorId = memberId;
+      if (existing) {
+        // Il tavolo esisteva già ma senza Connector — chi arriva ora
+        // e dice sì "adotta" retroattivamente chi si era già
+        // agganciato prima di lui, così anche i loro punti futuri
+        // iniziano a riflettersi su di lui da questo momento in poi.
+        await db.query(`
+          UPDATE squad_memberships SET connector_id = $1
+          WHERE arena_session_id = $2 AND table_qr_code = $3 AND connector_id IS NULL
+        `, [memberId, arenaSessionId, tableQrCode]);
+      }
     }
+    // Se non esiste ancora nessuna riga per questo tavolo e questo
+    // arrivo dice "no", resolvedConnectorId resta vuoto — il tavolo
+    // aspetta semplicemente che arrivi qualcuno che dica sì.
   }
 
   await db.query(`
@@ -302,6 +322,114 @@ async function awardTopTalentBonuses(arenaSessionId, { db, io }) {
 }
 
 
+/**
+ * ============================================================
+ * BONUS "TAVOLO PIÙ ATTIVO" DI FINE SERATA (19/9, idea dell'utente)
+ * ============================================================
+ * Diverso dal Talent Scout qui sopra: quello premia il Connector in
+ * base al SUO SINGOLO membro più popolare (una stella, anche se il
+ * resto del tavolo è spento) — questo invece guarda la SOMMA dei
+ * punti ORGANICI di TUTTI i partecipanti del tavolo insieme, e premia
+ * il tavolo compatto/coinvolto nel suo insieme, non il singolo. I due
+ * bonus convivono, un tavolo può vincerli entrambi.
+ *
+ * Va SOLO ai tavoli che hanno un Connector assegnato (quelli senza
+ * restano fuori dai giochi, esclusi anche dalla classifica interna,
+ * non solo dalla vittoria) — pensato apposta per dare un motivo
+ * concreto anche a un gruppo di semplici amici, senza nessun PR di
+ * professione, per nominare comunque un Connector: a differenza del
+ * riflesso punti/Talent Scout (che vanno SOLO al Connector), questo
+ * bonus si divide in parti UGUALI tra TUTTI i partecipanti del
+ * tavolo (stesso principio già usato per Big Spender qui sopra).
+ *
+ * Punti ORGANICI = stessa identica definizione usata per il tetto di
+ * equità (populive-ranking-cap.js) — solo Like/Superlike/Pulse
+ * ricevuti, mai bonus — così un tavolo non scala questa classifica
+ * semplicemente perché il suo Connector ha già ricevuto punti
+ * riflessi da altrove.
+ *
+ * Va chiamata UNA VOLTA, quando l'Arena chiude per la notte (stesso
+ * momento esatto del Talent Scout, v. populive-scheduler.js,
+ * closeSessionIfOpen) — mai durante la serata, altrimenti "qual è il
+ * tavolo più attivo" cambierebbe in corsa.
+ * ============================================================
+ */
+const TABLE_ACTIVITY_BONUS_SOURCES = ['table_activity_bonus_1', 'table_activity_bonus_2', 'table_activity_bonus_3'];
+
+async function awardTopTableActivityBonuses(arenaSessionId, { db, io }) {
+  if (!(await isTopConnectorEnabled({ db }))) return { awarded: 0 };
+
+  // Tavoli idonei = hanno un Connector assegnato (connector_id non
+  // nullo per quel table_qr_code in questa sessione) — un tavolo
+  // senza Connector non entra proprio in questa classifica.
+  const topThreeTables = await db.queryAll(`
+    WITH eligible_tables AS (
+      SELECT DISTINCT table_qr_code
+      FROM squad_memberships
+      WHERE arena_session_id = $1 AND table_qr_code IS NOT NULL AND connector_id IS NOT NULL
+    ),
+    table_members AS (
+      SELECT DISTINCT sm.table_qr_code, sm.member_id
+      FROM squad_memberships sm
+      JOIN eligible_tables et ON et.table_qr_code = sm.table_qr_code
+      WHERE sm.arena_session_id = $1
+    ),
+    table_organic_totals AS (
+      SELECT tm.table_qr_code, COALESCE(SUM(pl.points), 0) AS organic_points
+      FROM table_members tm
+      LEFT JOIN points_ledger pl
+        ON pl.user_id = tm.member_id
+        AND pl.arena_session_id = $1
+        AND pl.counts_toward_local = true
+        AND pl.source = ANY(${ORGANIC_REFERENCE_SOURCES_SQL})
+      GROUP BY tm.table_qr_code
+    )
+    SELECT table_qr_code, organic_points
+    FROM table_organic_totals
+    ORDER BY organic_points DESC
+    LIMIT 3
+  `, [arenaSessionId]);
+
+  let awarded = 0;
+  for (let i = 0; i < topThreeTables.length; i++) {
+    const tableQrCode = topThreeTables[i].table_qr_code;
+
+    const members = await db.queryAll(`
+      SELECT DISTINCT member_id FROM squad_memberships
+      WHERE arena_session_id = $1 AND table_qr_code = $2
+    `, [arenaSessionId, tableQrCode]);
+
+    if (members.length === 0) continue; // difensivo, non dovrebbe mai capitare data la query sopra
+
+    const source = TABLE_ACTIVITY_BONUS_SOURCES[i];
+    const totalBonus = BASE_POINTS[source];
+    // Stesso principio del bonus spesa Big Spender: si divide in
+    // parti UGUALI tra tutti i partecipanti, non un awardPoints per
+    // persona (che applicherebbe moltiplicatori Premium/Founder/ecc.
+    // pensati per punti RICEVUTI da un'interazione vera, non per una
+    // quota di un bonus di squadra).
+    const perPersonPoints = Math.round(totalBonus / members.length);
+
+    for (const member of members) {
+      await db.query(`
+        INSERT INTO points_ledger (user_id, arena_session_id, points, source)
+        VALUES ($1, $2, $3, $4)
+      `, [member.member_id, arenaSessionId, perPersonPoints, source]);
+
+      io.to(`arena_${arenaSessionId}`).emit('points_update', {
+        userId: member.member_id,
+        points: perPersonPoints,
+        source,
+      });
+    }
+
+    awarded++;
+  }
+
+  return { awarded };
+}
+
+
 // ------------------------------------------------------------
 // STATO CONNECTOR — sempre per singola sessione, mai permanente
 // ------------------------------------------------------------
@@ -466,6 +594,7 @@ module.exports = {
   placeDiscoveryMarker,
   evaluatePendingDiscoveryMarkers,
   awardTopTalentBonuses,
+  awardTopTableActivityBonuses,
   getConnectorStatus,
   getSpenderStatus,
   awardTableSpendingBonus,
