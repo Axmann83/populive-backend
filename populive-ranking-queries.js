@@ -9,8 +9,18 @@
  * Nessuna tabella "classifica" separata da mantenere sincronizzata:
  * entrambe le viste derivano dalla stessa tabella points_ledger,
  * quindi non possono mai andare "fuori sincrono" tra loro.
+ *
+ * Il TETTO SUI PUNTI BONUS (Connector + Big Spender, 18/9) vive
+ * interamente in populive-ranking-cap.js — qui lo si usa e basta,
+ * tramite le due CTE che espone: local_capped_points (sotto, in
+ * getLocalRanking) e global_capped_points (in getGlobalRanking).
+ * Stessa somma capped va usata anche per il piazzamento del singolo
+ * utente in getUserRankingSummary più sotto, altrimenti il proprio
+ * profilo mostrerebbe punti diversi da quelli in classifica.
  * ============================================================
  */
+
+const { localCappedPointsCte, globalCappedPointsCte } = require('./populive-ranking-cap');
 
 async function getLocalRanking({ arenaSessionId, hashtag, gender }, { db }) {
   // Stessi filtri facoltativi della classifica globale — utili
@@ -40,28 +50,31 @@ async function getLocalRanking({ arenaSessionId, hashtag, gender }, { db }) {
   const extraWhere = conditions.length > 0 ? `AND ${conditions.join(' AND ')}` : '';
 
   const rows = await db.queryAll(`
+    WITH ${localCappedPointsCte('$1')}
     SELECT
       u.id AS user_id,
       u.display_name,
       u.avatar_emoji,
       u.photo_url,
-      COALESCE(SUM(pl.points), 0) AS local_points,
+      COALESCE(lcp.capped_points, 0) AS local_points,
       cs.is_top_connector,
       ss.is_top_spender
     FROM users u
     ${hashtagJoin}
-    LEFT JOIN points_ledger pl
-      ON pl.user_id = u.id
-      AND pl.arena_session_id = $1
-      AND pl.counts_toward_local = true
+    LEFT JOIN local_capped_points lcp ON lcp.user_id = u.id
     LEFT JOIN connector_status cs
       ON cs.user_id = u.id AND cs.arena_session_id = $1
     LEFT JOIN spender_status ss
       ON ss.user_id = u.id AND ss.arena_session_id = $1
-    JOIN checkins c
-      ON c.user_id = u.id AND c.arena_session_id = $1
+    -- DISTINCT invece di un JOIN diretto sulla tabella checkins: un
+    -- utente può avere più di una riga lì stasera (rientri dopo un
+    -- check-out, es. la decadenza per allontanamento — v. geofencing
+    -- in populive-checkin-logic.js), e con le CTE sopra al posto del
+    -- vecchio GROUP BY su tutta la riga non c'è più nulla che
+    -- assorba automaticamente quel possibile sdoppiamento.
+    JOIN (SELECT DISTINCT user_id FROM checkins WHERE arena_session_id = $1) c
+      ON c.user_id = u.id
     WHERE true ${extraWhere} AND u.deleted_at IS NULL
-    GROUP BY u.id, u.display_name, u.avatar_emoji, u.photo_url, cs.is_top_connector, ss.is_top_spender
     ORDER BY local_points DESC
   `, params);
 
@@ -116,22 +129,44 @@ async function getGlobalRanking({ limit = 100, hashtag, gender }, { db }) {
   params.push(limit);
 
   const rows = await db.queryAll(`
+    WITH ${globalCappedPointsCte()}
     SELECT
       u.id AS user_id,
       u.display_name,
       u.avatar_emoji,
       u.photo_url,
-      COALESCE(SUM(pl.points), 0) AS global_points,
-      fb.user_id IS NOT NULL AS is_founder
+      COALESCE(gcp.capped_points, 0) AS global_points,
+      fb.user_id IS NOT NULL AS is_founder,
+      COALESCE(tc.nights_won, 0) AS top_connector_nights_won
     FROM users u
     ${hashtagJoin}
-    LEFT JOIN points_ledger pl ON pl.user_id = u.id
+    LEFT JOIN global_capped_points gcp ON gcp.user_id = u.id
     LEFT JOIN founder_bracelets fb ON fb.user_id = u.id
+    -- Badge Top Connector A VITA (19/9, idea dell'utente) — quante
+    -- serate ha chiuso da Top Connector in tutta la sua storia, MAI
+    -- punti (zero interazione col tetto di equità qui sopra), solo
+    -- un contatore da mostrare in classifica generale come credibilità
+    -- pubblica ("quanto è bravo questo PR"), anche quando il punteggio
+    -- resta tappato come chiunque altro. Derivato al volo da
+    -- connector_status (mai cancellata a fine serata, a differenza
+    -- del "vivo" in Redis) — nessuna nuova colonna/contatore da tenere
+    -- sincronizzato a mano.
+    LEFT JOIN (
+      SELECT user_id, COUNT(*) FILTER (WHERE is_top_connector = true) AS nights_won
+      FROM connector_status
+      GROUP BY user_id
+    ) tc ON tc.user_id = u.id
     ${whereClause}
-    GROUP BY u.id, u.display_name, u.avatar_emoji, u.photo_url, fb.user_id
     ORDER BY global_points DESC
     LIMIT $${paramIndex}
   `, params);
+
+  // Stesso interruttore di sempre — se il Top Connector è spento da
+  // dashboard, anche il badge a vita sparisce (coerente con tutto il
+  // resto: is_top_connector nelle righe passate non sarebbe comunque
+  // mai stato vero mentre l'interruttore era spento).
+  const topConnectorFlag = await db.query(`SELECT is_enabled FROM feature_flags WHERE feature_key = 'top_connector'`);
+  const topConnectorEnabled = topConnectorFlag ? topConnectorFlag.is_enabled : true;
 
   return rows.map((r, i) => ({
     rank: i + 1,
@@ -141,6 +176,7 @@ async function getGlobalRanking({ limit = 100, hashtag, gender }, { db }) {
     photoUrl: r.photo_url,
     points: parseInt(r.global_points),
     isFounder: r.is_founder,
+    topConnectorNightsWon: topConnectorEnabled ? parseInt(r.top_connector_nights_won) : 0,
   }));
 }
 
@@ -177,41 +213,50 @@ async function getUserRankingSummary({ userId, arenaSessionId, viewerId }, { db 
   // dati globali, che esistono sempre.
   const hasValidSession = arenaSessionId && arenaSessionId.length > 0;
 
+  // Stessa somma "capped" (tetto sui punti bonus) già usata in
+  // getLocalRanking/getGlobalRanking qui sopra — altrimenti il
+  // proprio profilo mostrerebbe un punteggio diverso da quello con
+  // cui compare in classifica (v. populive-ranking-cap.js).
   let localPoints = 0;
   let localRankRow = { rank: null };
   if (hasValidSession) {
     const localPointsRow = await db.query(`
-      SELECT COALESCE(SUM(points), 0) AS total FROM points_ledger
-      WHERE user_id = $1 AND arena_session_id = $2 AND counts_toward_local = true
-    `, [userId, arenaSessionId]);
+      WITH ${localCappedPointsCte('$1')}
+      SELECT COALESCE(capped_points, 0) AS total FROM local_capped_points WHERE user_id = $2
+    `, [arenaSessionId, userId]);
     localPoints = parseInt(localPointsRow.total) || 0;
 
     localRankRow = await db.query(`
-      SELECT COUNT(*) + 1 AS rank
-      FROM (
-        SELECT user_id, SUM(points) AS pts
-        FROM points_ledger
-        WHERE arena_session_id = $1 AND counts_toward_local = true
-        GROUP BY user_id
-        HAVING SUM(points) > $2
-      ) higher_ranked
+      WITH ${localCappedPointsCte('$1')}
+      SELECT COUNT(*) + 1 AS rank FROM local_capped_points WHERE capped_points > $2
     `, [arenaSessionId, localPoints]);
   }
 
   const globalPointsRow = await db.query(`
-    SELECT COALESCE(SUM(points), 0) AS total FROM points_ledger WHERE user_id = $1
+    WITH ${globalCappedPointsCte()}
+    SELECT COALESCE(capped_points, 0) AS total FROM global_capped_points WHERE user_id = $1
   `, [userId]);
   const globalPoints = parseInt(globalPointsRow.total) || 0;
 
   const globalRankRow = await db.query(`
-    SELECT COUNT(*) + 1 AS rank
-    FROM (
-      SELECT user_id, SUM(points) AS pts
-      FROM points_ledger
-      GROUP BY user_id
-      HAVING SUM(points) > $1
-    ) higher_ranked
+    WITH ${globalCappedPointsCte()}
+    SELECT COUNT(*) + 1 AS rank FROM global_capped_points WHERE capped_points > $1
   `, [globalPoints]);
+
+  // Badge Top Connector a vita (19/9) — stesso principio di
+  // getGlobalRanking qui sopra: derivato al volo, mai una colonna a
+  // parte, sempre coerente con l'interruttore "Top Connector" di
+  // dashboard.
+  const topConnectorFlag = await db.query(`SELECT is_enabled FROM feature_flags WHERE feature_key = 'top_connector'`);
+  const topConnectorEnabled = topConnectorFlag ? topConnectorFlag.is_enabled : true;
+  let topConnectorNightsWon = 0;
+  if (topConnectorEnabled) {
+    const nightsRow = await db.query(`
+      SELECT COUNT(*) FILTER (WHERE is_top_connector = true) AS nights_won
+      FROM connector_status WHERE user_id = $1
+    `, [userId]);
+    topConnectorNightsWon = parseInt(nightsRow?.nights_won) || 0;
+  }
 
   return {
     hidden: false,
@@ -222,6 +267,7 @@ async function getUserRankingSummary({ userId, arenaSessionId, viewerId }, { db 
     displayName,
     photoUrl,
     avatarEmoji,
+    topConnectorNightsWon,
   };
 }
 

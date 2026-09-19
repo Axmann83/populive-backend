@@ -52,9 +52,41 @@ async function createProfile({ userId, displayName, bio, hashtagNames, genderFor
 
 // La foto si carica separatamente (va prima su storage esterno,
 // es. S3/Cloudinary, e SOLO l'indirizzo risultante si salva qui).
+// Resta per compatibilità (versioni vecchie dell'app potrebbero
+// ancora chiamarla) — internamente passa dalla stessa funzione
+// della galleria, con un array di una sola foto.
 async function setProfilePhoto({ userId, photoUrl }, { db }) {
-  await db.query(`UPDATE users SET photo_url = $1 WHERE id = $2`, [photoUrl, userId]);
-  return { success: true };
+  return setProfilePhotos({ userId, photoUrls: photoUrl ? [photoUrl] : [] }, { db });
+}
+
+/**
+ * ============================================================
+ * GALLERIA FOTO — fino a 6, in ordine (18/9)
+ * ============================================================
+ * Sostituisce SEMPRE l'intera galleria (il frontend gestisce in
+ * locale aggiunte/rimozioni/riordino, e manda qui il risultato
+ * finale già pronto) — più semplice e meno soggetto a errori di
+ * uno storico di piccole operazioni (aggiungi-questa, togli-quella)
+ * da tenere sincronizzate col server una per una.
+ *
+ * photo_url (singolare) resta sempre in sincrono, derivata da qui,
+ * MAI scritta altrove — è quella che continuano a leggere tutte le
+ * schermate con solo un piccolo cerchietto (radar/chat/notifiche/
+ * classifiche), che non devono sapere nulla della galleria.
+ * ============================================================
+ */
+async function setProfilePhotos({ userId, photoUrls }, { db }) {
+  const list = Array.isArray(photoUrls) ? photoUrls.filter((u) => typeof u === 'string' && u.trim()) : [];
+
+  if (list.length > 6) {
+    return { success: false, reason: 'too_many_photos', max: 6 };
+  }
+
+  await db.query(`
+    UPDATE users SET photo_urls = $1, photo_url = $2 WHERE id = $3
+  `, [list, list[0] || null, userId]);
+
+  return { success: true, photoUrls: list };
 }
 
 async function attachHashtags(userId, hashtagNames, { db }) {
@@ -188,7 +220,7 @@ async function requireCompletedOnboarding(userId, { db }) {
  */
 async function getPublicProfile({ userId, arenaSessionId, viewerId }, { db }) {
   const profile = await db.query(`
-    SELECT display_name, photo_url, avatar_emoji, bio, instant_influencer_category,
+    SELECT display_name, photo_url, photo_urls, avatar_emoji, bio, instant_influencer_category,
            is_premium, premium_expires_at, is_verified
     FROM users WHERE id = $1
   `, [userId]);
@@ -292,6 +324,10 @@ async function getPublicProfile({ userId, arenaSessionId, viewerId }, { db }) {
       userId,
       displayName: profile.display_name,
       photoUrl: profile.photo_url,
+      // Galleria vera (18/9) — array vuoto/assente su profili non
+      // ancora migrati: il frontend ricade da solo su photoUrl in
+      // quel caso (v. ProfileFullScreen.jsx), niente da gestire qui.
+      photoUrls: profile.photo_urls || [],
       avatarEmoji: profile.avatar_emoji || '🙂',
       isPremium: profile.is_premium || false,
       premiumExpiresAt: profile.premium_expires_at || null,
@@ -331,7 +367,7 @@ async function findUserByPhone({ phoneNumber }, { db }) {
   const normalized = cleaned.startsWith('+') ? cleaned : cleaned.startsWith('39') ? `+${cleaned}` : `+39${cleaned}`;
 
   const user = await db.query(`
-    SELECT id, display_name, photo_url, avatar_emoji, instant_influencer_category
+    SELECT id, display_name, photo_url, avatar_emoji, instant_influencer_category, is_professional_connector
     FROM users WHERE phone_number = $1
   `, [normalized]);
 
@@ -351,8 +387,24 @@ async function findUserByPhone({ phoneNumber }, { db }) {
       avatarEmoji: user.avatar_emoji || '🙂',
       instantInfluencerCategory: user.instant_influencer_category,
       products: productRows.map((p) => ({ name: p.product_name, url: p.product_url })),
+      // 19/9 — riusata dalla stessa ricerca per telefono anche per il
+      // toggle "PR professionista" in dashboard (v.
+      // ProfessionalConnectorSection in Dashboard.jsx), nessun nuovo
+      // endpoint di ricerca da mantenere.
+      isProfessionalConnector: !!user.is_professional_connector,
     },
   };
+}
+
+/**
+ * PR professionista (19/9) — flag booleana semplice, mai auto-
+ * attivabile: sblocca claimTableAsProfessionalConnector in
+ * populive-connector-engine.js (Connector di più tavoli nella stessa
+ * serata senza doversi sedere a nessuno di essi).
+ */
+async function setProfessionalConnectorStatus({ userId, isProfessionalConnector }, { db }) {
+  await db.query(`UPDATE users SET is_professional_connector = $1 WHERE id = $2`, [isProfessionalConnector, userId]);
+  return { success: true };
 }
 
 /**
@@ -384,6 +436,7 @@ async function setInstantInfluencerStatus({ userId, category, products }, { db }
 module.exports = {
   createProfile,
   setProfilePhoto,
+  setProfilePhotos,
   attachHashtags,
   updateProfileDetails,
   completeOnboarding,
@@ -391,4 +444,5 @@ module.exports = {
   getPublicProfile,
   findUserByPhone,
   setInstantInfluencerStatus,
+  setProfessionalConnectorStatus,
 };

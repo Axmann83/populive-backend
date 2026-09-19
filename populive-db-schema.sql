@@ -16,7 +16,16 @@ CREATE TABLE users (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     display_name        VARCHAR(50) NOT NULL,
     avatar_emoji        VARCHAR(10),                -- fallback demo/MVP, se manca la foto vera
-    photo_url           TEXT,                        -- foto profilo reale (storage esterno, es. S3/Cloudinary)
+    photo_url           TEXT,                        -- foto PRINCIPALE (storage esterno, es. S3/Cloudinary) —
+                                                        -- sempre derivata da photo_urls[1], mai scritta a mano
+                                                        -- altrove: resta qui SOLO per non toccare le decine di
+                                                        -- query già esistenti che mostrano un piccolo cerchietto
+                                                        -- (radar/chat/notifiche/classifiche) — quelle continuano
+                                                        -- a leggere questa singola colonna, senza saperne nulla
+                                                        -- della galleria.
+    photo_urls          TEXT[] DEFAULT '{}',           -- galleria vera (18/9) — fino a 6 foto, in ordine, mostrata
+                                                        -- per intero SOLO nel profilo a tutto schermo (scorrimento
+                                                        -- verticale stile Hinge). CHECK sotto: mai più di 6.
     bio                 VARCHAR(280),
 
     profile_type        VARCHAR(20) DEFAULT 'standard', -- 'standard' | 'professional'
@@ -62,7 +71,9 @@ CREATE TABLE users (
         -- 'premium_only'   → solo profili con is_premium = true
     appears_in_historical_search   BOOLEAN DEFAULT TRUE,            -- bacheca storica opt-out
 
-    created_at          TIMESTAMPTZ DEFAULT now()
+    created_at          TIMESTAMPTZ DEFAULT now(),
+
+    CONSTRAINT users_photo_urls_max_six CHECK (array_length(photo_urls, 1) IS NULL OR array_length(photo_urls, 1) <= 6)
 );
 
 -- Hashtag di autotargetizzazione (#fitness, #nightlife, ecc.)

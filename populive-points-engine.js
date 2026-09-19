@@ -33,6 +33,25 @@ const BASE_POINTS = {
   connector_top_talent_1:   30,   // tavolo con la persona più popolare della serata
   connector_top_talent_2:   20,   // secondo tavolo più "in alto"
   connector_top_talent_3:   10,   // terzo tavolo più "in alto"
+
+  // Bonus "TAVOLO PIÙ ATTIVO" di fine serata (19/9, idea dell'utente)
+  // — diverso dal Talent Scout sopra: qui non conta il singolo membro
+  // più popolare del tavolo, conta la somma dei punti ORGANICI di
+  // TUTTI i suoi partecipanti insieme. Premia un tavolo compatto e
+  // coinvolto nel suo insieme, non un tavolo con una sola stella.
+  // Va SOLO ai tavoli che hanno un Connector assegnato (nessuno vince
+  // se il tavolo non ne ha nominato uno) — pensato apposta per dare
+  // un motivo concreto anche a un tavolo di semplici amici (senza
+  // nessun PR di professione) per nominare comunque un Connector: a
+  // differenza del riflesso punti/Talent Scout (che premiano SOLO il
+  // Connector), questo bonus si divide in parti UGUALI tra TUTTI i
+  // partecipanti del tavolo (stesso principio già usato per Big
+  // Spender) — costruito in awardTopTableActivityBonuses,
+  // populive-connector-engine.js. Valori INDICATIVI, da tarare, più
+  // alti del Talent Scout perché qui vanno spartiti tra più persone.
+  table_activity_bonus_1:  60,   // tavolo (con Connector) con la somma di punti organici più alta della serata
+  table_activity_bonus_2:  40,   // secondo tavolo più attivo
+  table_activity_bonus_3:  20,   // terzo tavolo più attivo
 };
 
 // Punti a chi COMPIE l'azione (non solo a chi la riceve) — valori
