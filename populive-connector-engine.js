@@ -90,30 +90,66 @@ async function isTopConnectorEnabled({ db }) {
 // ------------------------------------------------------------
 // A) MOTORE FISICO — Squad via QR
 // ------------------------------------------------------------
-async function joinSquad({ connectorId, memberId, arenaSessionId, tableQrCode, wantsToBeConnector }, { db }) {
+
+/**
+ * Chi è OGGI il Connector di questo tavolo, guardando le DUE fonti
+ * possibili (19/9) — mai una sola:
+ *   1) table_connector_assignments — un PR PROFESSIONISTA può essersi
+ *      pre-assegnato il tavolo prima ancora che arrivi il primo
+ *      membro (v. claimTableAsProfessionalConnector sotto). Se
+ *      esiste una riga qui, vince SEMPRE — nessun "primo che
+ *      scansiona" può scavalcarla.
+ *   2) squad_memberships — il comportamento "spontaneo" di sempre:
+ *      il primo membro che ha accettato di diventare Connector.
+ * Usata sia da joinSquad (per sapere a chi riflettere i punti) sia
+ * da setTableLock (per verificare che chi blocca il tavolo sia
+ * davvero il suo Connector).
+ */
+async function resolveTableConnectorId({ arenaSessionId, tableQrCode }, { db }) {
+  const assigned = await db.query(`
+    SELECT connector_id FROM table_connector_assignments
+    WHERE arena_session_id = $1 AND table_qr_code = $2
+  `, [arenaSessionId, tableQrCode]);
+  if (assigned) return assigned.connector_id;
+
+  const viaSquad = await db.query(`
+    SELECT connector_id FROM squad_memberships
+    WHERE arena_session_id = $1 AND table_qr_code = $2 AND connector_id IS NOT NULL
+    LIMIT 1
+  `, [arenaSessionId, tableQrCode]);
+  return viaSquad ? viaSquad.connector_id : null;
+}
+
+async function joinSquad({ connectorId, memberId, arenaSessionId, tableQrCode, wantsToBeConnector }, { db, redis }) {
   if (connectorId === memberId) return { success: false, reason: 'cannot_join_own_squad' };
 
+  // Tavolo chiuso dal suo Connector (19/9, idea dell'utente — evita
+  // che chi passa semplicemente vicino al tavolo dopo che il gruppo
+  // vero si è già formato possa infilarsi a prendere una fetta dei
+  // bonus di squadra): nessun nuovo ingresso finché non viene
+  // riaperto, chi era già dentro non viene toccato.
+  if (tableQrCode && await isTableLocked({ arenaSessionId, tableQrCode }, { redis })) {
+    return { success: false, reason: 'table_locked' };
+  }
+
   // Se questo tavolo ha GIÀ un Connector confermato (qualcuno prima
-  // ha risposto sì), si eredita — nessuna nuova domanda per chi arriva
-  // dopo. MA se il tavolo esiste già senza un Connector (il primo
-  // arrivato ha detto no, o semplicemente nessuno l'ha ancora
-  // reclamato), il posto resta APERTO: chi arriva dopo può ancora
-  // dire sì e diventare Connector (19/9, corretto un limite del primo
-  // design — prima solo il PRIMISSIMO che scansionava aveva la
+  // ha risposto sì, oppure un PR professionista se lo è pre-assegnato
+  // — v. resolveTableConnectorId sopra), si eredita — nessuna nuova
+  // domanda per chi arriva dopo. MA se il tavolo esiste già senza un
+  // Connector (il primo arrivato ha detto no, o semplicemente nessuno
+  // l'ha ancora reclamato), il posto resta APERTO: chi arriva dopo può
+  // ancora dire sì e diventare Connector (19/9, corretto un limite del
+  // primo design — prima solo il PRIMISSIMO che scansionava aveva la
   // possibilità di scegliere, una pura questione di chi tira fuori
   // il telefono più in fretta, non di chi è davvero disposto a farlo).
   // Chi lo reclama in un secondo momento "adotta" anche chi si era
   // già agganciato prima di lui, aggiornando le loro righe.
   let resolvedConnectorId = connectorId;
   if (tableQrCode && resolvedConnectorId === undefined) {
-    const existing = await db.query(`
-      SELECT connector_id FROM squad_memberships
-      WHERE arena_session_id = $1 AND table_qr_code = $2
-      LIMIT 1
-    `, [arenaSessionId, tableQrCode]);
+    const currentConnectorId = await resolveTableConnectorId({ arenaSessionId, tableQrCode }, { db });
 
-    if (existing && existing.connector_id) {
-      resolvedConnectorId = existing.connector_id;
+    if (currentConnectorId) {
+      resolvedConnectorId = currentConnectorId;
     } else if (wantsToBeConnector) {
       // Nessuno ha ancora reclamato il ruolo per questo tavolo (primo
       // arrivo in assoluto, oppure chi è arrivato prima ha detto no)
@@ -121,16 +157,15 @@ async function joinSquad({ connectorId, memberId, arenaSessionId, tableQrCode, w
       // voto x1.5) arriva più tardi se i punti accumulati bastano,
       // questo è solo il momento in cui SCEGLIE di provarci.
       resolvedConnectorId = memberId;
-      if (existing) {
-        // Il tavolo esisteva già ma senza Connector — chi arriva ora
-        // e dice sì "adotta" retroattivamente chi si era già
-        // agganciato prima di lui, così anche i loro punti futuri
-        // iniziano a riflettersi su di lui da questo momento in poi.
-        await db.query(`
-          UPDATE squad_memberships SET connector_id = $1
-          WHERE arena_session_id = $2 AND table_qr_code = $3 AND connector_id IS NULL
-        `, [memberId, arenaSessionId, tableQrCode]);
-      }
+      // Se il tavolo esisteva già ma senza Connector, chi arriva ora
+      // e dice sì "adotta" retroattivamente chi si era già agganciato
+      // prima di lui — la UPDATE non trova nulla da fare (nessun
+      // effetto) se non esisteva ancora nessuna riga per il tavolo,
+      // quindi è sicura da lanciare sempre, senza controllare prima.
+      await db.query(`
+        UPDATE squad_memberships SET connector_id = $1
+        WHERE arena_session_id = $2 AND table_qr_code = $3 AND connector_id IS NULL
+      `, [memberId, arenaSessionId, tableQrCode]);
     }
     // Se non esiste ancora nessuna riga per questo tavolo e questo
     // arrivo dice "no", resolvedConnectorId resta vuoto — il tavolo
@@ -143,7 +178,110 @@ async function joinSquad({ connectorId, memberId, arenaSessionId, tableQrCode, w
     ON CONFLICT (member_id, arena_session_id) DO NOTHING
   `, [resolvedConnectorId || null, memberId, arenaSessionId, tableQrCode || null]);
 
-  return { success: true, linkedToConnector: !!resolvedConnectorId };
+  return {
+    success: true,
+    linkedToConnector: !!resolvedConnectorId,
+    // A chi ha appena chiesto di diventare Connector serve sapere se
+    // ci è VERAMENTE riuscito (es. per mostrargli il bottone "chiudi
+    // il tavolo") — linkedToConnector da solo non basta, è true anche
+    // per un membro qualunque che ha semplicemente ereditato il
+    // Connector di qualcun altro.
+    isConnector: !!resolvedConnectorId && resolvedConnectorId === memberId,
+  };
+}
+
+/**
+ * ============================================================
+ * PR PROFESSIONISTA — CONNECTOR DI PIÙ TAVOLI (19/9, idea dell'utente)
+ * ============================================================
+ * Un PR di professione gestisce spesso più tavoli nella stessa
+ * serata — non ha senso obbligarlo a "sedersi" fisicamente a uno
+ * solo di essi per poterne essere il Connector (era l'unico modo
+ * possibile finora, per via dell'UNIQUE (member_id, arena_session_id)
+ * su squad_memberships: un utente può comparire come MEMBRO di una
+ * sola squad a sera).
+ *
+ * Qui si separano le due cose: questa funzione lo rende Connector di
+ * un tavolo SENZA inserire nessuna riga con lui come membro — resta
+ * fuori dal conteggio punti organici di quel tavolo (non genera lui
+ * stesso interazioni sedendosi lì), ma i bonus da Connector (riflesso
+ * squadra 15%, Talent Scout) continuano ad arrivargli normalmente,
+ * perché quelle query leggono sempre connector_id da squad_memberships
+ * — che qui viene risolto tramite resolveTableConnectorId sopra,
+ * senza nessuna modifica a quelle query.
+ *
+ * Riservata a chi ha is_professional_connector = true — un flag
+ * settabile SOLO da dashboard (mai auto-attivabile), per evitare che
+ * chiunque si dichiari "PR" di dieci tavoli diversi solo per fare
+ * incetta di bonus.
+ * ============================================================
+ */
+async function claimTableAsProfessionalConnector({ connectorId, arenaSessionId, tableQrCode }, { db }) {
+  const user = await db.query(`SELECT is_professional_connector FROM users WHERE id = $1`, [connectorId]);
+  if (!user || !user.is_professional_connector) {
+    return { success: false, reason: 'not_a_professional_connector' };
+  }
+
+  // Se il tavolo ha già un Connector "spontaneo" (un amico del
+  // gruppo ha già accettato scansionando fisicamente), quella scelta
+  // resta valida — un PR arrivato dopo non può scavalcarla.
+  const existingSquadConnector = await db.query(`
+    SELECT connector_id FROM squad_memberships
+    WHERE arena_session_id = $1 AND table_qr_code = $2 AND connector_id IS NOT NULL
+    LIMIT 1
+  `, [arenaSessionId, tableQrCode]);
+  if (existingSquadConnector) {
+    return { success: false, reason: 'table_already_has_a_connector' };
+  }
+
+  const inserted = await db.query(`
+    INSERT INTO table_connector_assignments (arena_session_id, table_qr_code, connector_id)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (arena_session_id, table_qr_code) DO NOTHING
+    RETURNING connector_id
+  `, [arenaSessionId, tableQrCode, connectorId]);
+
+  if (!inserted) {
+    return { success: false, reason: 'table_already_assigned' };
+  }
+
+  return { success: true };
+}
+
+/**
+ * ============================================================
+ * BLOCCO TAVOLO (19/9, idea dell'utente)
+ * ============================================================
+ * Stato VIVO di sessione, non permanente — stesso principio già
+ * usato per radar/contatore check-in (Redis, mai Postgres), sparisce
+ * da solo a fine serata con il resto (v. closeSessionIfOpen in
+ * populive-scheduler.js). Un Set per sessione (arena:<id>:locked_tables)
+ * invece di una chiave per tavolo, per poterlo ripulire con un solo
+ * DEL a fine serata senza dover conoscere in anticipo quanti tavoli
+ * sono stati bloccati.
+ * Solo il Connector VERO del tavolo (spontaneo o PR pre-assegnato,
+ * v. resolveTableConnectorId) può bloccarlo/sbloccarlo — mai un
+ * membro qualunque.
+ * ============================================================
+ */
+async function isTableLocked({ arenaSessionId, tableQrCode }, { redis }) {
+  if (!tableQrCode || !redis) return false;
+  return !!(await redis.sismember(`arena:${arenaSessionId}:locked_tables`, tableQrCode));
+}
+
+async function setTableLock({ requestingUserId, arenaSessionId, tableQrCode, locked }, { db, redis }) {
+  const currentConnectorId = await resolveTableConnectorId({ arenaSessionId, tableQrCode }, { db });
+  if (!currentConnectorId || currentConnectorId !== requestingUserId) {
+    return { success: false, reason: 'not_the_table_connector' };
+  }
+
+  if (locked) {
+    await redis.sadd(`arena:${arenaSessionId}:locked_tables`, tableQrCode);
+  } else {
+    await redis.srem(`arena:${arenaSessionId}:locked_tables`, tableQrCode);
+  }
+
+  return { success: true, locked };
 }
 
 /**
@@ -602,4 +740,8 @@ module.exports = {
   updateVenueSpendingConfig,
   isBigSpenderEnabled,
   isTopConnectorEnabled,
+  claimTableAsProfessionalConnector,
+  isTableLocked,
+  setTableLock,
+  resolveTableConnectorId,
 };
