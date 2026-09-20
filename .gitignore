@@ -14,6 +14,7 @@ npm-debug.log*
 
 # Editor / IDE / strumenti
 .claude/
+CLAUDE.local.md
 .vscode/
 .idea/
 *.swp
