@@ -241,7 +241,7 @@ async function getUserRankingSummary({ userId, arenaSessionId, viewerId }, { db 
     `,
       [arenaSessionId, userId]
     );
-    localPoints = parseInt(localPointsRow.total) || 0;
+    localPoints = parseInt(localPointsRow?.total) || 0;
 
     localRankRow = await db.query(
       `
@@ -259,7 +259,7 @@ async function getUserRankingSummary({ userId, arenaSessionId, viewerId }, { db 
   `,
     [userId]
   );
-  const globalPoints = parseInt(globalPointsRow.total) || 0;
+  const globalPoints = parseInt(globalPointsRow?.total) || 0;
 
   const globalRankRow = await db.query(
     `
