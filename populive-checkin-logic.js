@@ -64,13 +64,52 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
   // ------------------------------------------------------------
   // STEP 2 — Scrivere l'evento permanente in Postgres
   // ------------------------------------------------------------
-  await db.query(
+  // Il controllo Redis qui sopra da solo non basta: due richieste
+  // arrivate nello stesso istante (doppio tocco, QR aperto due
+  // volte, StrictMode in sviluppo) lo passano entrambe prima che una
+  // delle due abbia scritto. L'arbitro vero è l'indice unico
+  // (user_id, arena_session_id) — migrazione 004: chi arriva
+  // secondo non inserisce niente e riceve la stessa risposta "già
+  // dentro", SENZA toccare il contatore soglia (che altrimenti
+  // salirebbe di due per una persona sola).
+  const inserted = await db.query(
     `
     INSERT INTO checkins (user_id, arena_session_id, checked_in_at)
     VALUES ($1, $2, now())
+    ON CONFLICT (user_id, arena_session_id) DO NOTHING
+    RETURNING id
   `,
     [userId, session.id]
   );
+
+  if (!inserted) {
+    // La riga c'era già: o la richiesta "gemella" ha vinto la gara,
+    // o Redis ha perso il set (riavvio) mentre la persona era già
+    // entrata stasera. In entrambi i casi è di nuovo dentro: la riga
+    // si riapre (se era stata chiusa) e il set Redis si ripristina,
+    // entrambe operazioni che non fanno danni se ripetute.
+    await db.query(
+      `
+      UPDATE checkins SET checked_out_at = NULL
+      WHERE user_id = $1 AND arena_session_id = $2
+    `,
+      [userId, session.id]
+    );
+    try {
+      await redis.sadd(`arena:${session.id}:radar`, userId);
+    } catch (err) {
+      logInternalAlert('redis_unavailable_during_checkin', { venueId, sessionId: session.id, err });
+    }
+    const currentCount = (await redis.get(`arena:${session.id}:checkin_count`).catch(() => null)) || 0;
+    return {
+      success: true,
+      alreadyIn: true,
+      arenaSessionId: session.id,
+      arenaActive: session.is_active,
+      checkinCount: parseInt(currentCount),
+      threshold: session.checkin_threshold,
+    };
+  }
 
   // ------------------------------------------------------------
   // STEP 2.5 — Un Pulse è legato al locale in cui è stato ricevuto.

@@ -43,6 +43,28 @@ function setupWebSocket(httpServer, { db }) {
       socket.data.userId = userId;
       socket.data.arenaSessionId = arenaSessionId;
 
+      // Rientrare nella stanza vuol dire essere ancora nel locale: se
+      // una disconnessione precedente (schermo bloccato, app in
+      // background, pagina ricaricata) aveva segnato l'uscita, la
+      // annulliamo. Senza questo, la prima disconnessione della
+      // serata chiudeva il check-in per sempre — handleCheckin non
+      // ne crea uno nuovo per chi è già entrato — e i report ai
+      // locali (picco di presenze, permanenza media) contavano la
+      // persona come uscita dopo pochi secondi. Solo se la serata
+      // accetta ancora ingressi: una sessione chiusa resta chiusa.
+      await db.query(
+        `
+        UPDATE checkins SET checked_out_at = NULL
+        FROM arena_sessions
+        WHERE arena_sessions.id = checkins.arena_session_id
+          AND arena_sessions.is_open_for_checkin = true
+          AND checkins.user_id = $1
+          AND checkins.arena_session_id = $2
+          AND checkins.checked_out_at IS NOT NULL
+      `,
+        [userId, arenaSessionId]
+      );
+
       // GHOST MODE — impostazione permanente del profilo, mai legata
       // a una sola serata. Chi la attiva resta invisibile al resto
       // del radar: niente avviso "è entrato" per gli altri, e più
@@ -122,6 +144,17 @@ function setupWebSocket(httpServer, { db }) {
       if (!arenaSessionId) return; // non era mai entrato in nessuna Arena
 
       const room = `arena_${arenaSessionId}`;
+
+      // Se la stessa persona ha ancora un'altra connessione aperta in
+      // questa stanza (pagina ricaricata: la vecchia connessione si
+      // chiude DOPO che la nuova è già entrata; oppure due schede),
+      // non è uscita davvero: niente check-out e niente "left".
+      // Al momento del disconnect questo socket ha già lasciato le
+      // stanze, quindi quelli rimasti sono tutti "altri".
+      const stillConnected = [...(io.sockets.adapter.rooms.get(room) || [])].some(
+        (id) => io.sockets.sockets.get(id)?.data?.userId === userId
+      );
+      if (stillConnected) return;
 
       // Registriamo una stima di "orario di uscita" — utile SOLO in
       // forma aggregata per i report ai locali (v. populive-venue-insights.js),

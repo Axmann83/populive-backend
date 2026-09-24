@@ -23,7 +23,7 @@ const MIN_SAMPLE_SIZE = 10;
  * quando davvero si riempie (spesso diverso da quando "dovrebbe").
  */
 async function getArrivalTimeDistribution({ venueId, fromDate, toDate }, { db }) {
-  const rows = await db.query(
+  const rows = await db.queryAll(
     `
     SELECT EXTRACT(HOUR FROM checked_in_at) AS hour, COUNT(*) AS arrivals
     FROM checkins
@@ -81,7 +81,7 @@ async function getAverageDwellTime({ venueId, fromDate, toDate }, { db }) {
  * si beve qui", ma come "tendenza tra chi usa PopuLive".
  */
 async function getPopularDrinks({ venueId, fromDate, toDate }, { db }) {
-  const rows = await db.query(
+  const rows = await db.queryAll(
     `
     SELECT pulses.drink_type, COUNT(*) AS redemptions
     FROM pulses
@@ -112,7 +112,7 @@ async function getPopularDrinks({ venueId, fromDate, toDate }, { db }) {
  * locali" lato utente.
  */
 async function getAttendanceTrend({ venueId, fromDate, toDate }, { db }) {
-  const rows = await db.query(
+  const rows = await db.queryAll(
     `
     SELECT
       arena_sessions.session_date,
@@ -365,7 +365,7 @@ async function getReturnRate({ venueId, fromDate, toDate }, { db }) {
  * quando davvero un locale "esplode".
  */
 async function getPeakConcurrentAttendance({ venueId, fromDate, toDate }, { db }) {
-  const rows = await db.query(
+  const rows = await db.queryAll(
     `
     WITH hourly_snapshots AS (
       SELECT
