@@ -199,6 +199,14 @@ async function closeSessionIfOpen(venue, { db, redis, io }) {
     [openSession.id]
   );
 
+  await db.query(
+    `
+    UPDATE checkins SET checked_out_at = now()
+    WHERE arena_session_id = $1 AND checked_out_at IS NULL
+  `,
+    [openSession.id]
+  );
+
   // Chat: rispetta il doppio consenso "conserva" già costruito —
   // chiude solo quelle senza consenso reciproco.
   await closeConversationsForSession(openSession.id, { db });

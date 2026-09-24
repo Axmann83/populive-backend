@@ -40,6 +40,37 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
   }
 
   // ------------------------------------------------------------
+  // CAMBIO LOCALE — chi fa check-in qui non è più altrove
+  // ------------------------------------------------------------
+
+  const leftElsewhere = await db.queryAll(
+    `
+    UPDATE checkins SET checked_out_at = now()
+    FROM arena_sessions
+    WHERE arena_sessions.id = checkins.arena_session_id
+      AND arena_sessions.is_open_for_checkin = true
+      AND checkins.user_id = $1
+      AND checkins.arena_session_id != $2
+      AND checkins.checked_out_at IS NULL
+    RETURNING checkins.arena_session_id
+  `,
+    [userId, session.id]
+  );
+
+  if (leftElsewhere.length > 0) {
+    const ghostRow = await db.query(`SELECT ghost_mode_enabled FROM users WHERE id = $1`, [userId]);
+    if (!ghostRow?.ghost_mode_enabled) {
+      for (const { arena_session_id: oldSessionId } of leftElsewhere) {
+        try {
+          broadcastToOthers(io, `arena_${oldSessionId}`, userId, 'presence_update', { type: 'left', userId });
+        } catch (err) {
+          logInternalAlert('websocket_broadcast_failed_venue_change', { userId, oldSessionId, err });
+        }
+      }
+    }
+  }
+
+  // ------------------------------------------------------------
   // CASO LIMITE 1 — Doppio check-in nella stessa sessione
   // ------------------------------------------------------------
   // Controlliamo PRIMA di scrivere qualunque cosa: se questo
