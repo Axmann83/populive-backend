@@ -1,6 +1,7 @@
 /**
  * Carica db/seed-dev.sql nel database locale (dati di prova).
  * Uso:  npm run db:seed
+ *       node scripts/db-seed.js percorso/altro-file.sql   (un altro file SQL)
  */
 const fs = require('fs');
 const path = require('path');
@@ -14,13 +15,16 @@ loadDotEnv(path.join(ROOT, '.env.dev'));
 async function main() {
   const client = new Client({ connectionString: process.env.DATABASE_URL });
   await client.connect();
-  await client.query(fs.readFileSync(path.join(ROOT, 'db', 'seed-dev.sql'), 'utf8'));
+  const sqlFile = path.resolve(ROOT, process.argv[2] || path.join('db', 'seed-dev.sql'));
+  await client.query(fs.readFileSync(sqlFile, 'utf8'));
   const { rows } = await client.query(`
     SELECT (SELECT COUNT(*) FROM venues) AS venues,
            (SELECT COUNT(*) FROM iap_products) AS products,
            (SELECT COUNT(*) FROM hashtags) AS hashtags
   `);
-  console.log(`Seed caricato — locali: ${rows[0].venues}, prodotti: ${rows[0].products}, hashtag: ${rows[0].hashtags}`);
+  console.log(
+    `${path.relative(ROOT, sqlFile)} caricato — locali: ${rows[0].venues}, prodotti: ${rows[0].products}, hashtag: ${rows[0].hashtags}`
+  );
   await client.end();
 }
 

@@ -29,6 +29,10 @@ desktop.ini
 tmp/
 *.tmp
 
+# Simulazione di una serata (npm run db:sim non esiste: v. CLAUDE.local.md).
+# Rende TUTTI gli utenti account di prova: resta solo in locale.
+db/sim-serata.sql
+
 # Dump del database locale
 *.sql.gz
 *.dump
