@@ -25,6 +25,7 @@
  * ============================================================
  */
 
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const twilio = require('twilio');
 
@@ -51,6 +52,60 @@ function isDevOtpBypassEnabled() {
 }
 
 /**
+ * NUMERO DI TEST PER I REVISORI (Apple/Google, e le nostre prove sui
+ * telefoni veri) — vale ANCHE in produzione, ma per un solo numero:
+ * quello scritto in APP_REVIEW_TEST_PHONE_NUMBER, che entra con il
+ * codice fisso APP_REVIEW_TEST_OTP_CODE senza passare da Twilio.
+ *
+ * Perché non più tramite Twilio (24/9): la versione precedente
+ * chiedeva a Twilio di usare un "codice personalizzato", funzione
+ * che sul nostro servizio Verify non è abilitata (errore 60204,
+ * "Custom code not allowed") — la verifica non partiva mai e il
+ * login del revisore falliva sempre con verification_failed. In più
+ * ogni tentativo mandava comunque un SMS vero, a pagamento, a un
+ * numero che nessuno legge.
+ *
+ * Il prezzo di saltare Twilio è che perdiamo il suo limite di
+ * tentativi: senza un freno, 6 cifre si indovinano provandole tutte.
+ * Da qui il blocco dopo REVIEWER_MAX_FAILED_ATTEMPTS errori, tenuto
+ * in memoria del processo — basta per rendere impraticabile il
+ * tentare a tappeto (5 prove ogni 15 minuti), e un riavvio del
+ * server che lo azzera non cambia l'ordine di grandezza.
+ *
+ * Il numero della variabile viene normalizzato come quello digitato,
+ * così uno spazio o un "0039" scritti su Railway non rompono il
+ * confronto. Se manca una delle due variabili, il meccanismo è spento.
+ */
+const REVIEWER_MAX_FAILED_ATTEMPTS = 5;
+const REVIEWER_LOCK_MS = 15 * 60 * 1000;
+const reviewerFailedAttempts = { count: 0, lockedUntil: 0 };
+
+function isReviewerTestNumber(normalizedPhone) {
+  if (!process.env.APP_REVIEW_TEST_PHONE_NUMBER || !process.env.APP_REVIEW_TEST_OTP_CODE) return false;
+  return normalizedPhone === normalizePhoneNumber(process.env.APP_REVIEW_TEST_PHONE_NUMBER);
+}
+
+function checkReviewerCode(code) {
+  if (Date.now() < reviewerFailedAttempts.lockedUntil) return 'locked';
+
+  const expected = Buffer.from(process.env.APP_REVIEW_TEST_OTP_CODE);
+  const given = Buffer.from(String(code ?? ''));
+  const ok = given.length === expected.length && crypto.timingSafeEqual(given, expected);
+
+  if (ok) {
+    reviewerFailedAttempts.count = 0;
+    return 'approved';
+  }
+  reviewerFailedAttempts.count += 1;
+  if (reviewerFailedAttempts.count >= REVIEWER_MAX_FAILED_ATTEMPTS) {
+    reviewerFailedAttempts.count = 0;
+    reviewerFailedAttempts.lockedUntil = Date.now() + REVIEWER_LOCK_MS;
+    console.warn('[auth] numero di test: troppi codici sbagliati, bloccato per 15 minuti');
+  }
+  return 'pending';
+}
+
+/**
  * STEP 1 — L'utente inserisce il numero, Twilio Verify genera e
  * manda lui stesso il codice via SMS (col suo modello predefinito,
  * utilizzabile anche in prova). Non creiamo ancora nessun utente
@@ -60,20 +115,10 @@ async function requestOtp({ phoneNumber }) {
   const normalizedPhone = normalizePhoneNumber(phoneNumber);
   if (!normalizedPhone) return { success: false, reason: 'invalid_phone_number' };
 
-  // Numero di test per i revisori Apple/Google (12/9) — un numero
-  // vero e proprio, semplicemente mai controllato per davvero,
-  // perché il codice è SEMPRE lo stesso. Richiede "Enable Custom
-  // Verification Code" attivato a mano sul servizio Verify (scheda
-  // General, pannello Twilio) — senza quello, Twilio rifiuterebbe
-  // il parametro custom_code sotto. Configurato via variabili
-  // d'ambiente, mai scritto fisso nel codice: numero e codice sono
-  // informazioni da consegnare ai soli revisori, non da lasciare
-  // visibili a chiunque legga il repository.
-  const isReviewerTestNumber = normalizedPhone === process.env.APP_REVIEW_TEST_PHONE_NUMBER;
-  const verificationParams = { to: normalizedPhone, channel: 'sms' };
-  if (isReviewerTestNumber && process.env.APP_REVIEW_TEST_OTP_CODE) {
-    verificationParams.customCode = process.env.APP_REVIEW_TEST_OTP_CODE;
-  }
+  // Numero di test dei revisori: nessun SMS, il codice è già noto
+  // (v. isReviewerTestNumber più sopra). Numero e codice stanno solo
+  // nelle variabili d'ambiente, mai scritti nel repository.
+  if (isReviewerTestNumber(normalizedPhone)) return { success: true };
 
   if (isDevOtpBypassEnabled()) {
     console.info(
@@ -84,17 +129,11 @@ async function requestOtp({ phoneNumber }) {
 
   try {
     const client = getTwilioClient();
-    await client.verify.v2.services(process.env.TWILIO_VERIFY_SERVICE_SID).verifications.create(verificationParams);
+    await client.verify.v2
+      .services(process.env.TWILIO_VERIFY_SERVICE_SID)
+      .verifications.create({ to: normalizedPhone, channel: 'sms' });
   } catch (err) {
     console.error('[auth] invio SMS fallito:', err);
-    // Per il numero di test dei revisori, NON blocchiamo qui — il
-    // codice è comunque fisso e noto in anticipo (12/9, la persona
-    // reale dietro questo numero non può più controllare l'SMS).
-    // Se la verifica non è stata davvero creata lato Twilio, il
-    // passo successivo (verifyOtp) lo scoprirà da solo con un
-    // errore più chiaro ("codice sbagliato") invece di bloccare
-    // tutto già a questo primo passo.
-    if (isReviewerTestNumber) return { success: true };
     // Se l'SMS non parte per davvero (es. numero non verificato in
     // un account ancora in prova), non ha senso dire all'utente
     // "controlla il telefono" — meglio un errore chiaro subito.
@@ -125,7 +164,12 @@ async function verifyOtp({ phoneNumber, code }, { db }) {
   if (!normalizedPhone) return { success: false, reason: 'invalid_phone_number' };
 
   let check;
-  if (isDevOtpBypassEnabled()) {
+  if (isReviewerTestNumber(normalizedPhone)) {
+    // Nessuna chiamata a Twilio: confronto col codice della variabile
+    const status = checkReviewerCode(code);
+    if (status === 'locked') return { success: false, reason: 'too_many_attempts' };
+    check = { status };
+  } else if (isDevOtpBypassEnabled()) {
     // Nessuna chiamata a Twilio: il codice giusto è quello nel .env
     check = { status: code === process.env.APP_REVIEW_TEST_OTP_CODE ? 'approved' : 'pending' };
   } else
@@ -223,7 +267,13 @@ function normalizePhoneNumber(raw) {
   // secondo prefisso davanti (bug vero, trovato nei log reali:
   // un numero digitato così diventava +3900393894381164).
   if (cleaned.startsWith('0039')) return `+39${cleaned.slice(4)}`;
-  if (cleaned.startsWith('39')) return `+${cleaned}`;
+  // "39" davanti vale come prefisso SOLO se il numero è più lungo di
+  // un cellulare italiano (10 cifre): 390, 391, 392, 393 sono anche
+  // l'inizio di cellulari normali, e l'app (solo Italia) fa scrivere
+  // il numero senza prefisso. Prima un "3917596393" diventava
+  // "+3917596393" — numero inesistente, rifiutato da Twilio (60200),
+  // e chi ha un cellulare 39x non riusciva a registrarsi (24/9).
+  if (cleaned.startsWith('39') && cleaned.length >= 11) return `+${cleaned}`;
   return `+39${cleaned}`;
 }
 
