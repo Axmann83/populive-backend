@@ -1261,7 +1261,9 @@ app.get(
   '/api/users/:userId/active-chats',
   requireOnboarded,
   ah(async (req, res) => {
-    const conversations = await getMyActiveConversations({ userId: req.params.userId }, deps);
+    // req.userId (dal token), mai quello scritto nell'indirizzo: la
+    // risposta include l'anteprima dei messaggi.
+    const conversations = await getMyActiveConversations({ userId: req.userId }, deps);
     res.json({ success: true, conversations });
   })
 );

@@ -343,14 +343,36 @@ async function purgeExpiredChatMessages({ db }) {
  * della pagina, anche se "Conserva" era stato scelto da entrambi —
  * lo stato di "quale chat ho aperto" viveva solo nella sessione del
  * browser, sparendo ad ogni refresh.
+ *
+ * Per ogni chat anche quanti messaggi dell'altra persona non sono
+ * ancora stati letti e l'anteprima dell'ultimo — il solo pallino
+ * totale sulla scheda Chat non diceva CHI aveva scritto (segnalato
+ * dal vivo). Stesso criterio di "non letto" di getUnreadChatCount.
+ * Ordinate per ultima attività, come in qualsiasi app di messaggi.
  */
 async function getMyActiveConversations({ userId }, { db }) {
   const rows = await db.queryAll(
     `
-    SELECT id, user_a_id, user_b_id
-    FROM chat_conversations
-    WHERE (user_a_id = $1 OR user_b_id = $1) AND closed_at IS NULL
-    ORDER BY created_at DESC
+    SELECT c.id, c.user_a_id, c.user_b_id, last_msg.body AS last_message_body,
+      last_msg.sender_id AS last_message_sender_id, last_msg.created_at AS last_message_at,
+      (
+        SELECT COUNT(*) FROM chat_messages m
+        WHERE m.conversation_id = c.id
+          AND m.sender_id != $1
+          AND m.created_at > COALESCE(
+            CASE WHEN c.user_a_id = $1 THEN c.user_a_last_read_at ELSE c.user_b_last_read_at END,
+            '1970-01-01'::timestamptz
+          )
+      ) AS unread_count
+    FROM chat_conversations c
+    LEFT JOIN LATERAL (
+      SELECT body, sender_id, created_at FROM chat_messages
+      WHERE conversation_id = c.id
+      ORDER BY created_at DESC
+      LIMIT 1
+    ) last_msg ON true
+    WHERE (c.user_a_id = $1 OR c.user_b_id = $1) AND c.closed_at IS NULL
+    ORDER BY COALESCE(last_msg.created_at, c.created_at) DESC
   `,
     [userId]
   );
@@ -358,6 +380,10 @@ async function getMyActiveConversations({ userId }, { db }) {
   return rows.map((r) => ({
     conversationId: r.id,
     withUserId: r.user_a_id === userId ? r.user_b_id : r.user_a_id,
+    unreadCount: parseInt(r.unread_count) || 0,
+    lastMessage: r.last_message_body
+      ? { body: r.last_message_body, fromMe: r.last_message_sender_id === userId, at: r.last_message_at }
+      : null,
   }));
 }
 
