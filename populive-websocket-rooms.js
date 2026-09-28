@@ -23,19 +23,50 @@ function setupWebSocket(httpServer, { db }) {
     // Il telefono, appena connesso, dichiara "sono nell'Arena X"
     // ------------------------------------------------------------
     socket.on('join_arena', async ({ arenaSessionId, userId }) => {
+      // Uscito dal locale per distanza (geofence, migrazione 005): una
+      // riconnessione non basta a rientrare nel radar — niente stanza,
+      // niente "è entrato" agli altri, check-in che resta chiuso. Il
+      // telefono viene avvisato e torna alla schermata del QR: solo
+      // una nuova scansione (handleCheckin) riapre il check-in.
+      //
+      // Questo controllo va fatto PRIMA di uscire dalle stanze: tra
+      // "esci" ed "entra" non deve esserci nessuna attesa. Se il socket
+      // restasse fuori dalla stanza anche solo per la durata di una
+      // query, una disconnessione di un'altra connessione della stessa
+      // persona (vecchio socket dopo la riapertura dell'app, doppio
+      // montaggio di StrictMode) in quell'istante la farebbe risultare
+      // uscita, chiudendole il check-in (visto il 28/9 nel test 1c).
+      const closedForDistance = await db.query(
+        `
+        SELECT 1 FROM checkins
+        WHERE user_id = $1 AND arena_session_id = $2 AND checked_out_reason = 'distance'
+      `,
+        [userId, arenaSessionId]
+      );
+
       // Un telefono può essere in UNA sola Arena alla volta:
       // se era già in una stanza precedente (es. ha cambiato
       // locale, o l'app si è riconnessa), lo togliamo da lì prima.
       leaveAllArenaRooms(socket);
-
-      const room = `arena_${arenaSessionId}`;
-      socket.join(room);
 
       // Oltre alla stanza condivisa dell'Arena, ogni telefono entra
       // anche nella SUA stanza privata personale — serve per gli
       // eventi che riguardano solo lui (es. "hai ricevuto una Pulse"),
       // che non devono arrivare a tutti quelli che sono nel locale.
       socket.join(`user_${userId}`);
+
+      if (closedForDistance) {
+        socket.data.userId = userId;
+        // Dimentica un'eventuale Arena precedente di questo socket: alla
+        // sua disconnessione non deve toccare un check-in (magari
+        // riaperto nel frattempo da un nuovo QR su un'altra connessione).
+        socket.data.arenaSessionId = null;
+        socket.emit('arena_access_denied', { arenaSessionId, reason: 'out_of_range' });
+        return;
+      }
+
+      const room = `arena_${arenaSessionId}`;
+      socket.join(room);
 
       // Teniamo traccia di chi è cosa, per la disconnessione pulita
       // (vedi più sotto) e per poter rispondere a domande tipo
@@ -61,6 +92,7 @@ function setupWebSocket(httpServer, { db }) {
           AND checkins.user_id = $1
           AND checkins.arena_session_id = $2
           AND checkins.checked_out_at IS NOT NULL
+          AND checkins.checked_out_reason IS DISTINCT FROM 'distance'
       `,
         [userId, arenaSessionId]
       );

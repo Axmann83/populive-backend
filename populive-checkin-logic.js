@@ -81,6 +81,19 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
   const alreadyCheckedIn = await redis.sismember(`arena:${session.id}:radar`, userId);
 
   if (alreadyCheckedIn) {
+    // Chi scansiona di nuovo il QR è fisicamente qui: se il suo
+    // check-in era stato chiuso (disconnessione, o geofence con
+    // motivo 'distance' — migrazione 005) si riapre adesso. Prima
+    // questo ramo non toccava la riga e contava su join_arena per
+    // riaprirla, ma join_arena ora non riapre più un'uscita per
+    // distanza: il QR è l'unico modo per rientrare dopo averlo fatto.
+    await db.query(
+      `
+      UPDATE checkins SET checked_out_at = NULL, checked_out_reason = NULL
+      WHERE user_id = $1 AND arena_session_id = $2 AND checked_out_at IS NOT NULL
+    `,
+      [userId, session.id]
+    );
     const currentCount = (await redis.get(`arena:${session.id}:checkin_count`)) || 0;
     return {
       success: true,
@@ -121,7 +134,7 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
     // entrambe operazioni che non fanno danni se ripetute.
     await db.query(
       `
-      UPDATE checkins SET checked_out_at = NULL
+      UPDATE checkins SET checked_out_at = NULL, checked_out_reason = NULL
       WHERE user_id = $1 AND arena_session_id = $2
     `,
       [userId, session.id]
@@ -414,13 +427,25 @@ async function evaluateLocationPing({ userId, arenaSessionId, latitude, longitud
   }
 
   // Oltre il raggio: il check-in decade davvero, stesso identico
-  // effetto della disconnessione WebSocket.
+  // effetto della disconnessione WebSocket — ma col motivo
+  // 'distance' (migrazione 005): a differenza di una disconnessione,
+  // una semplice riconnessione (join_arena) non deve riaprirlo. Per
+  // rientrare serve scansionare di nuovo il QR.
   await db.query(
     `
-    UPDATE checkins SET checked_out_at = now() WHERE id = $1
+    UPDATE checkins SET checked_out_at = now(), checked_out_reason = 'distance' WHERE id = $1
   `,
     [checkin.id]
   );
+
+  // I socket di questa persona escono dalla stanza del radar: senza,
+  // continuerebbero a ricevere presenze e classifica del locale che
+  // ha lasciato. La stanza privata user_<id> resta (notifiche).
+  try {
+    io.in(`user_${userId}`).socketsLeave(`arena_${arenaSessionId}`);
+  } catch (err) {
+    logInternalAlert('websocket_leave_failed_geofence', { userId, arenaSessionId, err });
+  }
 
   // NON tocchiamo né il set Redis "già entrato in questa sessione"
   // né il contatore soglia (checkin_count): quel dato serve solo a
