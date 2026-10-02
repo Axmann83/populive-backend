@@ -18,7 +18,7 @@
 const { refundPulseCredit, createIgnoredCooldownBlock } = require('./populive-interactions-logic');
 const { broadcastToOthers } = require('./populive-websocket-rooms');
 
-async function handleCheckin({ userId, venueId }, { db, redis, io }) {
+async function handleCheckin({ userId, venueId, resumeSessionId }, { db, redis, io }) {
   // ------------------------------------------------------------
   // STEP 1 — Trovare (o rifiutare) la sessione Arena di oggi
   // ------------------------------------------------------------
@@ -37,6 +37,34 @@ async function handleCheckin({ userId, venueId }, { db, redis, io }) {
     // Il locale non ha ancora aperto secondo i suoi orari,
     // oppure ha già chiuso per stasera.
     return { success: false, reason: 'venue_closed' };
+  }
+
+  // ------------------------------------------------------------
+  // RIPRESA AUTOMATICA (bug B8, 2/10) — non è un QR scansionato:
+  // l'app, riaprendosi, ritenta da sola il check-in nell'ultimo
+  // locale in cui eravamo (v. getLastVenue nel frontend). Vale SOLO
+  // per la stessa serata in cui la persona era entrata davvero col
+  // QR: prima il locale memorizzato non scadeva mai, e riaprendo
+  // l'app giorni dopo, da casa, si veniva fatti entrare nella serata
+  // del giorno, con tanto di radar, contatore soglia e report falsati.
+  // Rifiutiamo PRIMA di scrivere qualunque cosa anche se il check-in
+  // era stato chiuso dal geofence: lì serve un nuovo QR, come per
+  // join_arena.
+  // ------------------------------------------------------------
+  if (resumeSessionId !== undefined) {
+    const previous =
+      resumeSessionId === session.id
+        ? await db.query(
+            `
+        SELECT checked_out_reason FROM checkins
+        WHERE user_id = $1 AND arena_session_id = $2
+      `,
+            [userId, session.id]
+          )
+        : null;
+    if (!previous || previous.checked_out_reason === 'distance') {
+      return { success: false, reason: 'session_expired' };
+    }
   }
 
   // ------------------------------------------------------------

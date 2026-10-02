@@ -108,12 +108,42 @@ async function grantWeeklyFreePulses({ db }) {
 }
 
 async function processVenue(venue, { db, redis, io }) {
+  // Prima di tutto, le serate di giorni passati rimaste aperte (bug
+  // B9, 2/10): la chiusura qui sotto scatta solo fuori orario, quindi
+  // un locale aperto sempre (o con orario continuo), oppure un server
+  // spento proprio nelle ore di chiusura, lasciava la serata vecchia
+  // aperta per sempre accanto a quella nuova — check-in mai chiusi,
+  // bonus di fine serata mai assegnati, Pulse mai rimborsate.
+  await closeStaleSessions(venue, { db, redis, io });
+
   const isWithinWindow = await isVenueWithinOpenWindow(venue, { db });
 
   if (isWithinWindow) {
     await ensureSessionOpen(venue, { db, io });
   } else {
     await closeSessionIfOpen(venue, { db, redis, io });
+  }
+}
+
+/**
+ * Chiude ogni serata ancora aperta di questo locale che appartiene a
+ * una data PRECEDENTE alla serata corrente (current_business_date,
+ * che tiene già conto dei locali aperti oltre la mezzanotte) —
+ * qualunque sia l'orario in questo momento.
+ */
+async function closeStaleSessions(venue, { db, redis, io }) {
+  const staleSessions = await db.queryAll(
+    `
+    SELECT id FROM arena_sessions
+    WHERE venue_id = $1 AND is_open_for_checkin = true AND closed_at IS NULL
+      AND session_date < current_business_date($1)
+    ORDER BY opened_at
+  `,
+    [venue.id]
+  );
+
+  for (const session of staleSessions) {
+    await closeSession(session.id, { db, redis, io });
   }
 }
 
@@ -179,24 +209,33 @@ async function ensureSessionOpen(venue, { db }) {
  * solo il "vivo" della serata sparisce.
  */
 async function closeSessionIfOpen(venue, { db, redis, io }) {
-  const openSession = await db.query(
+  // Tutte, non solo l'ultima (prima c'era un LIMIT 1): se per qualche
+  // motivo ne erano rimaste aperte più d'una, le più vecchie non si
+  // sarebbero chiuse mai.
+  const openSessions = await db.queryAll(
     `
     SELECT id FROM arena_sessions
     WHERE venue_id = $1 AND is_open_for_checkin = true AND closed_at IS NULL
-    ORDER BY opened_at DESC LIMIT 1
+    ORDER BY opened_at
   `,
     [venue.id]
   );
 
-  if (!openSession) return; // niente da chiudere
+  for (const session of openSessions) {
+    await closeSession(session.id, { db, redis, io });
+  }
+}
 
+// La chiusura vera e propria di UNA serata — stessa procedura sia
+// per la fine dell'orario sia per le serate di giorni passati.
+async function closeSession(sessionId, { db, redis, io }) {
   await db.query(
     `
     UPDATE arena_sessions
     SET is_open_for_checkin = false, closed_at = now()
     WHERE id = $1
   `,
-    [openSession.id]
+    [sessionId]
   );
 
   await db.query(
@@ -204,12 +243,12 @@ async function closeSessionIfOpen(venue, { db, redis, io }) {
     UPDATE checkins SET checked_out_at = now()
     WHERE arena_session_id = $1 AND checked_out_at IS NULL
   `,
-    [openSession.id]
+    [sessionId]
   );
 
   // Chat: rispetta il doppio consenso "conserva" già costruito —
   // chiude solo quelle senza consenso reciproco.
-  await closeConversationsForSession(openSession.id, { db });
+  await closeConversationsForSession(sessionId, { db });
 
   // Pulse mai decise (pending/ignored) — buco trovato dal vivo:
   // restare nello stesso locale per sempre, senza mai scansionare
@@ -218,16 +257,16 @@ async function closeSessionIfOpen(venue, { db, redis, io }) {
   // comunque, con lo stesso rimborso già previsto per il cambio
   // locale. Le Pulse GIÀ accettate non c'entrano, restano valide
   // come deciso in precedenza.
-  await refundAbandonedPulsesForSession(openSession.id, { db });
+  await refundAbandonedPulsesForSession(sessionId, { db });
 
   // Bonus "talent scout" di fine serata (17/9) — i Connector dei tre
   // tavoli diversi con dentro la persona più popolare della sera.
   // Va fatto QUI, una volta sola alla chiusura vera, mai durante la
   // serata (altrimenti "chi è il più popolare" cambierebbe in corsa).
   try {
-    await awardTopTalentBonuses(openSession.id, { db, io });
+    await awardTopTalentBonuses(sessionId, { db, io });
   } catch (err) {
-    console.error(`[scheduler] errore nel bonus talent scout per sessione ${openSession.id}:`, err);
+    console.error(`[scheduler] errore nel bonus talent scout per sessione ${sessionId}:`, err);
   }
 
   // Bonus "tavolo più attivo" di fine serata (19/9) — stesso identico
@@ -236,32 +275,32 @@ async function closeSessionIfOpen(venue, { db, redis, io }) {
   // singolo membro più popolare, e si divide tra tutti i partecipanti
   // invece di andare solo al Connector — v. populive-connector-engine.js.
   try {
-    await awardTopTableActivityBonuses(openSession.id, { db, io });
+    await awardTopTableActivityBonuses(sessionId, { db, io });
   } catch (err) {
-    console.error(`[scheduler] errore nel bonus tavolo più attivo per sessione ${openSession.id}:`, err);
+    console.error(`[scheduler] errore nel bonus tavolo più attivo per sessione ${sessionId}:`, err);
   }
 
   // Pulizia dello stato "vivo" in Redis — il radar in tempo reale
   // e il contatore soglia di questa sessione non servono più.
   try {
-    await redis.del(`arena:${openSession.id}:radar`);
-    await redis.del(`arena:${openSession.id}:checkin_count`);
+    await redis.del(`arena:${sessionId}:radar`);
+    await redis.del(`arena:${sessionId}:checkin_count`);
     // Blocco tavoli (19/9) — stesso principio: stato vivo, sparisce
     // con la sessione, mai bisogno di sapere in anticipo quali tavoli
     // erano stati chiusi durante la serata.
-    await redis.del(`arena:${openSession.id}:locked_tables`);
+    await redis.del(`arena:${sessionId}:locked_tables`);
   } catch (err) {
     // Anche se Redis avesse un problema in questo istante, la
     // chiusura "ufficiale" in Postgres è già avvenuta — coerente
     // col principio fail-gracefully: il dato vivo si pulirà da
     // solo alla prossima scrittura, non è permanente comunque.
-    console.error(`[scheduler] pulizia Redis fallita per sessione ${openSession.id}:`, err);
+    console.error(`[scheduler] pulizia Redis fallita per sessione ${sessionId}:`, err);
   }
 
   // Avvisiamo chi è ancora collegato alla stanza che l'Arena ha
   // chiuso — utile per aggiornare l'interfaccia (es. "buonanotte,
   // la classifica di stanotte è congelata").
-  io.to(`arena_${openSession.id}`).emit('arena_closed', { arenaSessionId: openSession.id });
+  io.to(`arena_${sessionId}`).emit('arena_closed', { arenaSessionId: sessionId });
 }
 
 /**

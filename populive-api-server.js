@@ -391,8 +391,10 @@ app.post(
   '/api/checkin',
   requireOnboarded,
   ah(async (req, res) => {
-    const { venueId } = req.body;
-    const result = await handleCheckin({ userId: req.userId, venueId }, deps);
+    // resumeSessionId solo dalla ripresa automatica all'avvio dell'app,
+    // mai da un QR vero (v. handleCheckin, bug B8).
+    const { venueId, resumeSessionId } = req.body;
+    const result = await handleCheckin({ userId: req.userId, venueId, resumeSessionId }, deps);
     res.json(result);
   })
 );
