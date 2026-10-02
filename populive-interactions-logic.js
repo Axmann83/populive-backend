@@ -340,7 +340,14 @@ async function respondToSuperlike({ interactionId, receiverId, action }, { db, i
   if (!interaction || interaction.receiver_id !== receiverId || interaction.type !== 'superlike') {
     return { success: false, reason: 'not_found_or_not_yours' };
   }
-  if (interaction.status !== 'sent') {
+  // "In sospeso" (ignored) vuol dire "decido dopo" (decisione D9, 2/10):
+  // si può ancora accettare o rifiutare finché la serata è aperta e non
+  // si cambia locale (lì il Superlike passa a 'expired'). Prima solo
+  // 'sent' era decidibile, e "Lascia in sospeso" era di fatto un no.
+  if (interaction.status === 'ignored' && action === 'ignore') {
+    return { success: true, action, senderNotified: false }; // già in sospeso, niente da fare
+  }
+  if (interaction.status !== 'sent' && interaction.status !== 'ignored') {
     return { success: false, reason: 'already_decided' };
   }
 
@@ -810,7 +817,11 @@ async function respondToPulse({ pulseId, receiverId, action }, { db, io }) {
   if (!pulse || pulse.receiver_id !== receiverId) {
     return { success: false, reason: 'not_found_or_not_yours' };
   }
-  if (pulse.status !== 'pending') {
+  // "In sospeso" = "decido dopo" (D9, 2/10), v. respondToSuperlike.
+  if (pulse.status === 'ignored' && action === 'ignore') {
+    return { success: true, action, senderNotified: false }; // già in sospeso, niente da fare
+  }
+  if (pulse.status !== 'pending' && pulse.status !== 'ignored') {
     return { success: false, reason: 'already_decided' };
   }
 
@@ -1400,7 +1411,7 @@ async function getPendingReceivedInteractions({ userId }, { db }) {
   const rows = await db.queryAll(
     `
     (
-      SELECT i.id::text AS id, 'like' AS kind, i.created_at, v.name AS venue_name,
+      SELECT i.id::text AS id, 'like' AS kind, NULL AS status, i.created_at, v.name AS venue_name,
              NULL AS drink_type, NULL AS sender_id, NULL AS sender_name, NULL AS sender_photo
       FROM interactions i
       JOIN arena_sessions a ON a.id = i.arena_session_id
@@ -1413,17 +1424,17 @@ async function getPendingReceivedInteractions({ userId }, { db }) {
     )
     UNION ALL
     (
-      SELECT i.id::text AS id, 'superlike' AS kind, i.created_at, v.name AS venue_name,
+      SELECT i.id::text AS id, 'superlike' AS kind, i.status, i.created_at, v.name AS venue_name,
              NULL AS drink_type, u.id AS sender_id, u.display_name AS sender_name, u.photo_url AS sender_photo
       FROM interactions i
       JOIN arena_sessions a ON a.id = i.arena_session_id
       JOIN venues v ON v.id = a.venue_id
       JOIN users u ON u.id = i.sender_id
-      WHERE i.type = 'superlike' AND i.receiver_id = $1 AND i.status = 'sent'
+      WHERE i.type = 'superlike' AND i.receiver_id = $1 AND i.status IN ('sent', 'ignored') -- in sospeso = da decidere (D9)
     )
     UNION ALL
     (
-      SELECT p.id::text AS id, ('pulse_' || p.tier) AS kind, p.created_at, v.name AS venue_name,
+      SELECT p.id::text AS id, ('pulse_' || p.tier) AS kind, p.status, p.created_at, v.name AS venue_name,
              p.drink_type,
              CASE WHEN p.tier IN ('super', 'simple') THEN u.id ELSE NULL END,
              CASE WHEN p.tier IN ('super', 'simple') THEN u.display_name ELSE NULL END,
@@ -1432,7 +1443,7 @@ async function getPendingReceivedInteractions({ userId }, { db }) {
       JOIN arena_sessions a ON a.id = p.arena_session_id
       JOIN venues v ON v.id = a.venue_id
       JOIN users u ON u.id = p.sender_id
-      WHERE p.receiver_id = $1 AND p.status = 'pending'
+      WHERE p.receiver_id = $1 AND p.status IN ('pending', 'ignored') -- in sospeso = da decidere (D9)
     )
     ORDER BY created_at DESC
     LIMIT 100
@@ -1443,6 +1454,7 @@ async function getPendingReceivedInteractions({ userId }, { db }) {
   return rows.map((r) => ({
     id: r.id,
     kind: r.kind,
+    onHold: r.status === 'ignored', // "In sospeso": si decide ancora, ma senza il pulsante "sospendi"
     createdAt: r.created_at,
     venueName: r.venue_name,
     drinkType: r.drink_type,
@@ -1681,7 +1693,7 @@ async function getInteractionHistory({ userId }, { db }) {
                i.sender_id AS other_user_id,
                NULL AS drink_type, NULL AS chat_unlocked
         FROM interactions i
-        WHERE i.type = 'superlike' AND i.receiver_id = $1 AND i.status != 'sent'
+        WHERE i.type = 'superlike' AND i.receiver_id = $1 AND i.status NOT IN ('sent', 'ignored') -- in sospeso = ancora da decidere (D9)
       )
       UNION ALL
       (
@@ -1692,7 +1704,7 @@ async function getInteractionHistory({ userId }, { db }) {
                p.sender_id AS other_user_id,
                p.drink_type, p.chat_unlocked
         FROM pulses p
-        WHERE p.receiver_id = $1 AND p.status != 'pending'
+        WHERE p.receiver_id = $1 AND p.status NOT IN ('pending', 'ignored') -- in sospeso = ancora da decidere (D9)
       )
       UNION ALL
       (
@@ -1808,26 +1820,52 @@ async function getInteractionHistory({ userId }, { db }) {
 }
 
 /**
- * Numero sul pallino della scheda Notifiche — quante interazioni
- * ricevute (Like/Superlike/Pulse insieme) da quando la persona ha
- * aperto DAVVERO il Centro Notifiche l'ultima volta. Colonna
- * dedicata (notifications_last_seen_at), separata apposta da
- * last_seen_at (quella serve al "Bentornato" e ai suoi punti, un
- * concetto diverso).
+ * Numero sul pallino della scheda Notifiche — novità arrivate da
+ * quando la persona ha aperto DAVVERO il Centro Notifiche l'ultima
+ * volta. Colonna dedicata (notifications_last_seen_at), separata
+ * apposta da last_seen_at (quella serve al "Bentornato" e ai suoi
+ * punti, un concetto diverso).
  */
+// Conta solo le NOVITÀ ALTRUI tra le voci che il Centro Notifiche
+// mostra (decisione D10, 2/10, dopo il bug B19): i match da Like
+// reciproco in cui l'ultimo Like l'ha messo l'altra persona, e le
+// Pulse/i Superlike scaduti. Le proprie decisioni (accettato,
+// rifiutato, riscattato) restano nella lista come storico, ma non
+// accendono il numero: le si è appena prese, e accettare porta già in
+// chat. Prima (B19) contava ogni interazione ricevuta, anche i Like
+// semplici e ciò che è ancora da decidere, che nella lista non ci sono.
+// Limite noto: per le voci scadute conta l'ora d'arrivo, non quella
+// della scadenza (nessuna colonna la registra).
 async function getUnseenNotificationCount({ userId }, { db }) {
-  const row = await db.query(
-    `
-    SELECT COUNT(*) AS total FROM (
-      (SELECT id, created_at FROM interactions WHERE receiver_id = $1)
-      UNION ALL
-      (SELECT id, created_at FROM pulses WHERE receiver_id = $1)
-    ) combined
-    WHERE created_at > (SELECT notifications_last_seen_at FROM users WHERE id = $1)
-  `,
-    [userId]
+  const row = await db.query(`SELECT notifications_last_seen_at FROM users WHERE id = $1`, [userId]);
+  const lastSeen = row?.notifications_last_seen_at ? new Date(row.notifications_last_seen_at) : null;
+  const entries = (await getInteractionHistory({ userId }, { db })).filter(
+    (e) => !lastSeen || new Date(e.createdAt) > lastSeen
   );
-  return parseInt(row?.total) || 0;
+
+  const matchedWith = entries.filter((e) => e.kind === 'like_match' && e.otherPerson).map((e) => e.otherPerson.userId);
+  let matchedByOther = new Set();
+  if (matchedWith.length > 0) {
+    // Chi ha messo l'ULTIMO Like della coppia: se è l'altra persona, il
+    // match è arrivato da fuori; se siamo noi, l'abbiamo fatto noi.
+    const rows = await db.queryAll(
+      `
+      SELECT i.sender_id FROM interactions i
+      WHERE i.type = 'like' AND i.receiver_id = $1 AND i.sender_id = ANY($2)
+      GROUP BY i.sender_id
+      HAVING MAX(i.created_at) > (
+        SELECT MAX(r.created_at) FROM interactions r
+        WHERE r.type = 'like' AND r.sender_id = $1 AND r.receiver_id = i.sender_id
+      )
+    `,
+      [userId, matchedWith]
+    );
+    matchedByOther = new Set(rows.map((r) => r.sender_id));
+  }
+
+  return entries.filter(
+    (e) => e.status === 'expired' || (e.kind === 'like_match' && matchedByOther.has(e.otherPerson?.userId))
+  ).length;
 }
 
 async function markNotificationsSeen({ userId }, { db }) {

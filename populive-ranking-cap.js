@@ -74,7 +74,7 @@ const BONUS_CAP_FLOOR_MONTHLY = 400; // stesso principio, su base mensile — DA
 // fine serata, si divide tra tutti i partecipanti del tavolo — v.
 // awardTopTableActivityBonuses in populive-connector-engine.js.
 const BONUS_CAP_SOURCES_SQL = `ARRAY['squad_reflection','connector_discovery_bonus','connector_top_talent_1','connector_top_talent_2','connector_top_talent_3','table_spending_threshold','table_activity_bonus_1','table_activity_bonus_2','table_activity_bonus_3']`;
-const ORGANIC_REFERENCE_SOURCES_SQL = `ARRAY['like_received','superlike_received','pulse_standalone','pulse_like','pulse_like_match','pulse_super','like_match']`;
+const ORGANIC_REFERENCE_SOURCES_SQL = `ARRAY['like_received','superlike_received','pulse_standalone','pulse_like','pulse_like_match','pulse_simple','pulse_super','like_match']`;
 
 /**
  * Frammento CTE riusabile — punti-per-classifica di ogni utente in

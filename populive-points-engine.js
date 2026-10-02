@@ -20,6 +20,12 @@ const BASE_POINTS = {
   pulse_like: 10, // + bonus separato per ENTRAMBI se vince il minigioco (vedi pulse_like_match sotto)
   pulse_like_match: 5, // bonus al RICEVENTE per un match riuscito nel minigioco — +30% incluso via MULTIPLIERS.guess_match_bonus (5*1.3≈7), si somma correttamente a eventuali altri bonus (Premium, Founder, ecc.). Abbassato da 10 a 5: con 10 il totale (base pulse_like 10 + bonus 13) arrivava a 23, troppo vicino/sopra al Pulse+Superlike.
   like_match: 5, // bonus a ENTRAMBI per un match tra Like semplici (reciprocità) — FISSO, niente +30%: qui non c'è nessun minigioco da skippare, il match è automatico appena l'altro ricambia.
+  // Pulse "simple" (identità visibile, senza Superlike): mancava del
+  // tutto (bug B13, 2/10) — ogni invio andava in errore DOPO aver già
+  // scritto la Pulse, senza notifica né punti. 15/8 deciso dall'utente
+  // il 2/10: a metà tra standalone/+Like e +Superlike, che resta il
+  // massimo perché costa anche un Superlike.
+  pulse_simple: 15,
   pulse_super: 20, // il valore più alto tra tutte le interazioni dirette, apposta — è l'unica garantita al 100% (nessun minigioco, nessuna fortuna) e richiede una risorsa vera in più (il Superlike). Margine modesto sopra al tetto massimo teorico del Pulse+Like con match riuscito (17).
   mission_completed: 15, // missione sponsorizzata da brand
   connector_discovery_bonus: 18, // Top Connector: bonus per aver "scoperto" un profilo che poi esplode
@@ -63,6 +69,7 @@ const SENDER_POINTS = {
   superlike_received: 3,
   pulse_standalone: 4,
   pulse_like: 4,
+  pulse_simple: 8, // v. BASE_POINTS (bug B13)
   pulse_super: 14, // stesso principio: sopra il tetto massimo teorico lato mittente del Pulse+Like con match (11).
   pulse_like_match: 7, // 5 base + 30% già incluso (5*1,3=6,5, arrotondato a 7) — abbassato da 13, stesso motivo del lato ricevente.
   like_match: 5, // FISSO, stesso valore del ricevente — nessun +30% qui.
