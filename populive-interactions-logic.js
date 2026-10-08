@@ -1401,10 +1401,11 @@ async function refundAbandonedPulsesForSession(arenaSessionId, { db }) {
  * ============================================================
  * SOLO le interazioni ricevute ancora da decidere — un Like mai
  * diventato match (resta anonimo, un semplice "hai un ammiratore",
- * nessuna azione possibile su di lui), un Superlike ancora
- * status='sent', una Pulse ancora status='pending' in qualunque
- * variante. Rispetta le stesse regole di anonimato già in vigore:
- * solo Superlike e Pulse+Superlike svelano subito l'identità.
+ * nessuna azione possibile su di lui) o un Superlike ancora
+ * status='sent'. Rispetta le stesse regole di anonimato già in vigore:
+ * solo il Superlike svela subito l'identità.
+ * Le Pulse ricevute non ci sono più (decisione dell'utente, ottobre
+ * 2026): vivono solo nella scheda Pulse, con il suo badge.
  * ============================================================
  */
 async function getPendingReceivedInteractions({ userId }, { db }) {
@@ -1431,19 +1432,6 @@ async function getPendingReceivedInteractions({ userId }, { db }) {
       JOIN venues v ON v.id = a.venue_id
       JOIN users u ON u.id = i.sender_id
       WHERE i.type = 'superlike' AND i.receiver_id = $1 AND i.status IN ('sent', 'ignored') -- in sospeso = da decidere (D9)
-    )
-    UNION ALL
-    (
-      SELECT p.id::text AS id, ('pulse_' || p.tier) AS kind, p.status, p.created_at, v.name AS venue_name,
-             p.drink_type,
-             CASE WHEN p.tier IN ('super', 'simple') THEN u.id ELSE NULL END,
-             CASE WHEN p.tier IN ('super', 'simple') THEN u.display_name ELSE NULL END,
-             CASE WHEN p.tier IN ('super', 'simple') THEN u.photo_url ELSE NULL END
-      FROM pulses p
-      JOIN arena_sessions a ON a.id = p.arena_session_id
-      JOIN venues v ON v.id = a.venue_id
-      JOIN users u ON u.id = p.sender_id
-      WHERE p.receiver_id = $1 AND p.status IN ('pending', 'ignored') -- in sospeso = da decidere (D9)
     )
     ORDER BY created_at DESC
     LIMIT 100
@@ -1523,14 +1511,13 @@ async function getSentInteractionsHistory({ userId }, { db }) {
  * (che ora riguarda solo il Centro Notifiche ripensato).
  */
 async function getUnseenLikeCenterCount({ userId }, { db }) {
+  // Solo Like e Superlike: le Pulse hanno il loro badge, nella scheda
+  // Pulse (decisione dell'utente, ottobre 2026).
   const row = await db.query(
     `
-    SELECT COUNT(*) AS total FROM (
-      (SELECT id, created_at FROM interactions WHERE type IN ('like', 'superlike') AND receiver_id = $1)
-      UNION ALL
-      (SELECT id, created_at FROM pulses WHERE receiver_id = $1)
-    ) combined
-    WHERE created_at > (SELECT like_center_last_seen_at FROM users WHERE id = $1)
+    SELECT COUNT(*) AS total FROM interactions
+    WHERE type IN ('like', 'superlike') AND receiver_id = $1
+      AND created_at > (SELECT like_center_last_seen_at FROM users WHERE id = $1)
   `,
     [userId]
   );
