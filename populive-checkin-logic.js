@@ -414,6 +414,15 @@ async function evaluateLocationPing({ userId, arenaSessionId, latitude, longitud
     return { success: false, reason: 'invalid_coordinates' };
   }
 
+  // Un account di prova non viene mai messo fuori per distanza
+  // (richiesta dell'utente, ottobre 2026): serve a provare un locale
+  // con persone che sono altrove. Stesso principio dei limiti che gli
+  // account di prova già saltano nelle interazioni.
+  const testRow = await db.query(`SELECT is_test_account FROM users WHERE id = $1`, [userId]);
+  if (testRow?.is_test_account) {
+    return { success: true, skipped: true, reason: 'test_account' };
+  }
+
   // Il check-in di questo utente in questa serata, ancora aperta, se
   // non è già chiuso per distanza. Conta anche un check-in chiuso per
   // DISCONNESSIONE (bug B24, ottobre 2026): su iPhone il background
