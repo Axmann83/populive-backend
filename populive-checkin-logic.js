@@ -414,9 +414,13 @@ async function evaluateLocationPing({ userId, arenaSessionId, latitude, longitud
     return { success: false, reason: 'invalid_coordinates' };
   }
 
-  // Il check-in ancora "aperto" (mai chiuso) per questo utente in
-  // questa sessione — se non esiste, non c'è nulla da far decadere
-  // (o non è mai entrato, o è già uscito, es. via disconnessione).
+  // Il check-in di questo utente in questa serata, ancora aperta, se
+  // non è già chiuso per distanza. Conta anche un check-in chiuso per
+  // DISCONNESSIONE (bug B24, ottobre 2026): su iPhone il background
+  // sospende l'app e fa cadere il socket, il server chiude il check-in
+  // senza motivo, e al ritorno questo controllo arrivava prima della
+  // riconnessione — trovava "già uscito" e non faceva niente; subito
+  // dopo join_arena riapriva il check-in anche a chilometri dal locale.
   const checkin = await db.query(
     `
     SELECT
@@ -432,7 +436,8 @@ async function evaluateLocationPing({ userId, arenaSessionId, latitude, longitud
     JOIN venues ON venues.id = arena_sessions.venue_id
     WHERE checkins.user_id = $1
       AND checkins.arena_session_id = $2
-      AND checkins.checked_out_at IS NULL
+      AND arena_sessions.is_open_for_checkin = true
+      AND checkins.checked_out_reason IS DISTINCT FROM 'distance'
   `,
     [userId, arenaSessionId, latitude, longitude]
   );
@@ -458,10 +463,13 @@ async function evaluateLocationPing({ userId, arenaSessionId, latitude, longitud
   // effetto della disconnessione WebSocket — ma col motivo
   // 'distance' (migrazione 005): a differenza di una disconnessione,
   // una semplice riconnessione (join_arena) non deve riaprirlo. Per
-  // rientrare serve scansionare di nuovo il QR.
+  // rientrare serve scansionare di nuovo il QR. Se era già chiuso per
+  // disconnessione si tiene l'ora di allora e cambia solo il motivo.
   await db.query(
     `
-    UPDATE checkins SET checked_out_at = now(), checked_out_reason = 'distance' WHERE id = $1
+    UPDATE checkins
+    SET checked_out_at = COALESCE(checked_out_at, now()), checked_out_reason = 'distance'
+    WHERE id = $1
   `,
     [checkin.id]
   );
