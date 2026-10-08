@@ -404,7 +404,7 @@ async function handleCheckin({ userId, venueId, resumeSessionId }, { db, redis, 
  * populive-missions-logic.js, invece di inventarne una diversa.
  * ============================================================
  */
-const GEOFENCE_RADIUS_METERS = 200; // valore di partenza, uguale per tutti i locali — in
+const GEOFENCE_RADIUS_METERS = 2000; // 2 km (ottobre 2026: 200 m era troppo poco), uguale per tutti i locali — in
 // futuro potrebbe diventare una colonna per-locale
 // (un locale all'aperto molto grande potrebbe volerlo
 // più largo di uno piccolo al chiuso)
