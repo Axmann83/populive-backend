@@ -72,7 +72,8 @@ Il server legge **solo** `process.env`: non apre nessun file di configurazione d
 
 - **Connessione locale:** `postgres://populive:populive@localhost:5432/populive` — Redis su `redis://localhost:6379` (definiti in `docker-compose.yml`).
 - **Schema:** `populive-db-schema.sql` è lo schema base (MVP). `db/migrations/*.sql` contiene le modifiche successive, applicate in ordine alfabetico una sola volta ciascuna (registro nella tabella `schema_migrations`). La migrazione `001` allinea lo schema base a tutto ciò che il codice usa oggi (tabelle `feature_flags`, `architects`, `sponsored_missions`… e le colonne aggiunte nel tempo).
-- **Aggiungere una modifica allo schema:** crea `db/migrations/006_<descrizione>.sql` (numero successivo all'ultimo esistente), poi `npm run db:migrate`. Lancia `npm run db:validate` per verificare che codice e schema siano allineati.
+- **Funzioni SQL:** `current_business_date(venue_id)` dà la data della serata di un locale, in ora italiana (`Europe/Rome`, migrazione `006`) qualunque sia il fuso del database (UTC in locale e su Supabase).
+- **Aggiungere una modifica allo schema:** crea `db/migrations/007_<descrizione>.sql` (numero successivo all'ultimo esistente), poi `npm run db:migrate`. Lancia `npm run db:validate` per verificare che codice e schema siano allineati.
 - **Dati di prova** (`db/seed-dev.sql`): tre locali a Roma, catalogo prodotti, hashtag, default per tipo di locale. Gli utenti non sono nel seed: si creano con il login.
 - **Dashboard admin:** gli endpoint `/api/dashboard/*` richiedono che l'utente sia nella tabella `architects`. Per promuovere il tuo utente locale:
 
@@ -110,6 +111,22 @@ Il progetto è pensato per un hosting tipo **Railway** collegato al repository g
 - `populive-*-logic.js` / `-engine.js` / `-queries.js` — logica pura, riceve `{ db, redis, io }`
 - `populive-db-adapter.js` — wrapper su `pg` (`query` → una riga o `null`, `queryAll` → array)
 - `populive-websocket-rooms.js` — stanze Socket.IO per Arena/utente
-- `populive-scheduler.js` — apertura/chiusura automatica delle serate
+- `populive-scheduler.js` — apertura/chiusura automatica delle serate e uscite dopo 24 ore (vedi sotto)
 - `db/` — migrazioni e seed · `scripts/` — utilità DB (migrate, seed, validate)
 - `docker-compose.yml` — Postgres 16 + Redis 7 per lo sviluppo locale
+
+## Serate e presenza nel radar
+
+- **Una serata per locale e per giorno**, secondo gli orari del locale in ora italiana. Lo scheduler (ogni 5 minuti) la
+  porta in tre momenti: *aperta agli ingressi* (dentro l'orario) → *chiusa agli ingressi* (fuori orario: niente nuovi
+  check-in, ma chi c'è resta dentro) → *finita* (quando inizia la serata successiva dello stesso locale, oppure fuori
+  orario quando non resta più nessuno). Chiusura delle chat, rimborsi delle Pulse e bonus di fine serata scattano
+  quando la serata finisce. Apertura = chiusura (es. `06:00`–`06:00`) vuol dire aperto 24 ore: la serata cambia
+  all'orario di apertura.
+- **La presenza è il check-in, non la connessione:** chi chiude l'app o blocca il telefono resta nella serata e nel
+  radar degli altri. Si esce solo per uno di questi motivi (`checkins.checked_out_reason`): `manual` (pulsante "Esci
+  dal locale", `POST /api/checkin/leave`), `other_checkin` (check-in in un'altra serata), `distance` (geofence,
+  `POST /api/checkin/location-ping`), `session_end` (fine serata), `expired` (24 ore dopo il check-in). Si rientra
+  solo con un nuovo QR.
+- `GET /api/checkin/current` dice in quale serata l'utente risulta dentro: l'app lo usa per riprenderla quando non la
+  ricorda (altro dispositivo, dati cancellati).
