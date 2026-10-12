@@ -23,6 +23,8 @@ const {
   createVirtualVenue,
   getAllVenuesForMap,
   evaluateLocationPing,
+  leaveVenue,
+  getCurrentCheckin,
 } = require('./populive-checkin-logic');
 const {
   sendInteraction,
@@ -395,6 +397,27 @@ app.post(
     // mai da un QR vero (v. handleCheckin, bug B8).
     const { venueId, resumeSessionId } = req.body;
     const result = await handleCheckin({ userId: req.userId, venueId, resumeSessionId }, deps);
+    res.json(result);
+  })
+);
+
+// Serata in cui si risulta dentro adesso (D14): all'avvio, se l'app non
+// ne ricorda nessuna, riprende questa (v. getCurrentCheckin).
+app.get(
+  '/api/checkin/current',
+  requireOnboarded,
+  ah(async (req, res) => {
+    res.json(await getCurrentCheckin({ userId: req.userId }, deps));
+  })
+);
+
+// Pulsante "Esci dal locale" (ottobre 2026, D14): chiudere l'app non
+// fa più uscire dalla serata, quindi chi se ne va lo dice da qui.
+app.post(
+  '/api/checkin/leave',
+  requireOnboarded,
+  ah(async (req, res) => {
+    const result = await leaveVenue({ userId: req.userId, arenaSessionId: req.body.arenaSessionId }, deps);
     res.json(result);
   })
 );

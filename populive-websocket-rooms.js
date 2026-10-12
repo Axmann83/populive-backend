@@ -13,6 +13,12 @@
 
 const { Server } = require('socket.io');
 
+// Stesso controllo di populive-checkin-logic.js (che però importa
+// questo file: copiato qui per non creare un import circolare). Un id
+// non valido farebbe fallire la query su Postgres.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isUuid = (value) => typeof value === 'string' && UUID_RE.test(value);
+
 function setupWebSocket(httpServer, { db }) {
   const io = new Server(httpServer, {
     cors: { origin: '*' }, // da restringere al dominio vero in produzione
@@ -23,26 +29,34 @@ function setupWebSocket(httpServer, { db }) {
     // Il telefono, appena connesso, dichiara "sono nell'Arena X"
     // ------------------------------------------------------------
     socket.on('join_arena', async ({ arenaSessionId, userId }) => {
-      // Uscito dal locale per distanza (geofence, migrazione 005): una
-      // riconnessione non basta a rientrare nel radar — niente stanza,
-      // niente "è entrato" agli altri, check-in che resta chiuso. Il
-      // telefono viene avvisato e torna alla schermata del QR: solo
-      // una nuova scansione (handleCheckin) riapre il check-in.
+      if (!isUuid(arenaSessionId) || !isUuid(userId)) return;
+
+      // Fuori dalla serata (uscito per distanza, col pulsante "Esci",
+      // per un check-in altrove, dopo 24 ore, o serata finita — v.
+      // "Quando si esce da una serata" in populive-checkin-logic.js), o
+      // mai entrato: una riconnessione non basta a rientrare nel radar
+      // — niente stanza, niente "è entrato" agli altri, check-in che
+      // resta chiuso. Il telefono viene avvisato e torna alla schermata
+      // del QR: solo una nuova scansione (handleCheckin) lo riapre.
       //
       // Questo controllo va fatto PRIMA di uscire dalle stanze: tra
-      // "esci" ed "entra" non deve esserci nessuna attesa. Se il socket
-      // restasse fuori dalla stanza anche solo per la durata di una
-      // query, una disconnessione di un'altra connessione della stessa
-      // persona (vecchio socket dopo la riapertura dell'app, doppio
-      // montaggio di StrictMode) in quell'istante la farebbe risultare
-      // uscita, chiudendole il check-in (visto il 28/9 nel test 1c).
-      const closedForDistance = await db.query(
+      // "esci" ed "entra" non deve esserci nessuna attesa (bug B7, 28/9:
+      // allora una disconnessione in quell'istante chiudeva il
+      // check-in; oggi non più, ma il socket resterebbe comunque per
+      // un attimo senza ricevere gli eventi del radar).
+      const checkin = await db.query(
         `
-        SELECT 1 FROM checkins
-        WHERE user_id = $1 AND arena_session_id = $2 AND checked_out_reason = 'distance'
+        SELECT checkins.checked_out_reason, arena_sessions.closed_at
+        FROM checkins
+        JOIN arena_sessions ON arena_sessions.id = checkins.arena_session_id
+        WHERE checkins.user_id = $1 AND checkins.arena_session_id = $2
       `,
         [userId, arenaSessionId]
       );
+      let deniedReason = null;
+      if (!checkin) deniedReason = 'not_checked_in';
+      else if (checkin.closed_at !== null) deniedReason = 'session_end';
+      else if (checkin.checked_out_reason !== null) deniedReason = checkin.checked_out_reason;
 
       // Un telefono può essere in UNA sola Arena alla volta:
       // se era già in una stanza precedente (es. ha cambiato
@@ -55,44 +69,29 @@ function setupWebSocket(httpServer, { db }) {
       // che non devono arrivare a tutti quelli che sono nel locale.
       socket.join(`user_${userId}`);
 
-      if (closedForDistance) {
+      if (deniedReason) {
         socket.data.userId = userId;
-        // Dimentica un'eventuale Arena precedente di questo socket: alla
-        // sua disconnessione non deve toccare un check-in (magari
-        // riaperto nel frattempo da un nuovo QR su un'altra connessione).
         socket.data.arenaSessionId = null;
-        socket.emit('arena_access_denied', { arenaSessionId, reason: 'out_of_range' });
+        socket.emit('arena_access_denied', { arenaSessionId, reason: deniedReason });
         return;
       }
 
       const room = `arena_${arenaSessionId}`;
       socket.join(room);
 
-      // Teniamo traccia di chi è cosa, per la disconnessione pulita
-      // (vedi più sotto) e per poter rispondere a domande tipo
-      // "quanti siamo collegati in questa stanza in questo momento?"
+      // Teniamo traccia di chi è cosa (Ghost Mode, esclusione di sé
+      // stessi dagli avvisi, v. broadcastToOthers).
       socket.data.userId = userId;
       socket.data.arenaSessionId = arenaSessionId;
 
-      // Rientrare nella stanza vuol dire essere ancora nel locale: se
-      // una disconnessione precedente (schermo bloccato, app in
-      // background, pagina ricaricata) aveva segnato l'uscita, la
-      // annulliamo. Senza questo, la prima disconnessione della
-      // serata chiudeva il check-in per sempre — handleCheckin non
-      // ne crea uno nuovo per chi è già entrato — e i report ai
-      // locali (picco di presenze, permanenza media) contavano la
-      // persona come uscita dopo pochi secondi. Solo se la serata
-      // accetta ancora ingressi: una sessione chiusa resta chiusa.
+      // Un check-in chiuso per disconnessione dal vecchio codice
+      // (motivo NULL, prima dell'ottobre 2026) si riapre: per il
+      // codice di oggi la disconnessione non è un'uscita (D14).
       await db.query(
         `
         UPDATE checkins SET checked_out_at = NULL
-        FROM arena_sessions
-        WHERE arena_sessions.id = checkins.arena_session_id
-          AND arena_sessions.is_open_for_checkin = true
-          AND checkins.user_id = $1
-          AND checkins.arena_session_id = $2
-          AND checkins.checked_out_at IS NOT NULL
-          AND checkins.checked_out_reason IS DISTINCT FROM 'distance'
+        WHERE user_id = $1 AND arena_session_id = $2
+          AND checked_out_at IS NOT NULL AND checked_out_reason IS NULL
       `,
         [userId, arenaSessionId]
       );
@@ -134,26 +133,26 @@ function setupWebSocket(httpServer, { db }) {
       // il primo. Mandiamo un istantanea di chi è già presente,
       // SOLO a questo socket appena entrato.
       //
-      // Filtriamo per USERID, non solo per socket.id — un refresh
-      // della pagina, una seconda scheda, o una riconnessione che
-      // lascia per un attimo la vecchia connessione ancora aperta
-      // potrebbero altrimenti far comparire la stessa persona
-      // (se stessa) nel proprio radar, permettendole di toccarsi
-      // da sola e mandarsi Like/Superlike/Pulse — un vero bug, non
-      // solo un dettaglio estetico.
-      //
-      // Filtriamo ANCHE chi ha il Ghost Mode attivo — invisibile di
-      // default a chiunque, salvo la rivelazione mirata via
-      // interazione (evento a parte, mai qui).
-      const existingSocketIds = io.sockets.adapter.rooms.get(room) || new Set();
-      const existingUserIdsSet = new Set(); // un utente può avere più di una connessione attiva nella stessa stanza (es. proprio durante un refresh, la vecchia connessione resta aperta un attimo mentre la nuova si apre) — un Set evita di contarlo/mostrarlo più volte
-      for (const socketId of existingSocketIds) {
-        const otherSocket = io.sockets.sockets.get(socketId);
-        if (otherSocket?.data?.userId && otherSocket.data.userId !== userId && !otherSocket.data.isGhost) {
-          existingUserIdsSet.add(otherSocket.data.userId);
-        }
-      }
-      socket.emit('radar_snapshot', { userIds: [...existingUserIdsSet] });
+      // Dall'ottobre 2026 (D14) "presente" vuol dire check-in aperto,
+      // non connessione aperta: l'elenco viene dal DB, quindi contiene
+      // anche chi ha l'app chiusa o il telefono bloccato. Senza sé
+      // stessi (mai toccarsi da soli e mandarsi Like/Superlike/Pulse)
+      // e senza chi ha il Ghost Mode attivo — invisibile di default a
+      // chiunque, salvo la rivelazione mirata via interazione (evento
+      // a parte, mai qui). I blocchi li filtra il telefono.
+      const present = await db.queryAll(
+        `
+        SELECT checkins.user_id
+        FROM checkins
+        JOIN users ON users.id = checkins.user_id
+        WHERE checkins.arena_session_id = $1
+          AND checkins.checked_out_at IS NULL
+          AND checkins.user_id != $2
+          AND users.ghost_mode_enabled IS NOT TRUE
+      `,
+        [arenaSessionId, userId]
+      );
+      socket.emit('radar_snapshot', { userIds: present.map((row) => row.user_id) });
 
       // Confermiamo al telefono stesso che è entrato correttamente
       socket.emit('joined_arena_ack', { arenaSessionId });
@@ -169,56 +168,16 @@ function setupWebSocket(httpServer, { db }) {
     });
 
     // ------------------------------------------------------------
-    // Disconnessione (app chiusa, telefono spento, uscito dal locale)
+    // Disconnessione (app chiusa, telefono bloccato, rete persa)
     // ------------------------------------------------------------
-    socket.on('disconnect', async () => {
-      const { userId, arenaSessionId } = socket.data;
-      if (!arenaSessionId) return; // non era mai entrato in nessuna Arena
-
-      const room = `arena_${arenaSessionId}`;
-
-      // Se la stessa persona ha ancora un'altra connessione aperta in
-      // questa stanza (pagina ricaricata: la vecchia connessione si
-      // chiude DOPO che la nuova è già entrata; oppure due schede),
-      // non è uscita davvero: niente check-out e niente "left".
-      // Al momento del disconnect questo socket ha già lasciato le
-      // stanze, quindi quelli rimasti sono tutti "altri".
-      const stillConnected = [...(io.sockets.adapter.rooms.get(room) || [])].some(
-        (id) => io.sockets.sockets.get(id)?.data?.userId === userId
-      );
-      if (stillConnected) return;
-
-      // Registriamo una stima di "orario di uscita" — utile SOLO in
-      // forma aggregata per i report ai locali (v. populive-venue-insights.js),
-      // mai mostrata come dato individuale. È una stima "best effort":
-      // se l'app si chiude bruscamente (batteria scarica, crash) il
-      // disconnect può arrivare con qualche minuto di ritardo, non è
-      // un dato al secondo — sufficiente per medie, non per singoli casi.
-      await db.query(
-        `
-        UPDATE checkins
-        SET checked_out_at = now()
-        WHERE user_id = $1 AND arena_session_id = $2 AND checked_out_at IS NULL
-      `,
-        [userId, arenaSessionId]
-      );
-
-      // Avvisiamo gli altri che questa persona non è più "vivamente"
-      // collegata — utile per un radar accurato (es. per non mostrare
-      // come "presente ora" chi ha già chiuso l'app), anche se il suo
-      // check-in storico in Postgres resta comunque per sempre.
-      //
-      // Stessa regola del "joined": chi è in Ghost Mode non ha mai
-      // avvisato nessuno di essere entrato, quindi non ha senso
-      // avvisare che è uscito — nessuno stava "vedendo" la sua
-      // presenza da togliere.
-      if (!socket.data.isGhost) {
-        broadcastToOthers(io, room, userId, 'presence_update', {
-          type: 'left',
-          userId,
-        });
-      }
-    });
+    // Nessun gestore, di proposito (ottobre 2026, D14): chi ha fatto
+    // check-in resta nella serata, e nel radar degli altri, anche con
+    // l'app chiusa o tolta dal task manager. Prima qui il check-in si
+    // chiudeva e gli altri ricevevano "left": su iPhone bastava
+    // bloccare lo schermo per sparire dal radar (bug B24). I motivi
+    // per uscire sono in "Quando si esce da una serata"
+    // (populive-checkin-logic.js); socket.io toglie da solo il socket
+    // dalle stanze.
 
     function leaveAllArenaRooms(socket) {
       const rooms = [...socket.rooms].filter((r) => r.startsWith('arena_'));
@@ -255,16 +214,14 @@ module.exports = { setupWebSocket, broadcastToOthers };
 
 /**
  * ============================================================
- * NOTA: perché "presence" (chi è collegato ORA) è diverso
- * dal check-in registrato in Postgres.
+ * NOTA: "presence" nel radar = check-in aperto (ottobre 2026, D14)
  * ============================================================
- * Un utente può aver fatto check-in (evento storico permanente)
- * ma aver chiuso l'app cinque minuti dopo — è ancora "nell'Arena"
- * per la classifica e i punti, ma non è più "presente" nel radar
- * in tempo reale che gli altri vedono in questo istante. I due
- * concetti restano volutamente separati:
- *   - checkins (Postgres)          → per sempre, per punti/storico
- *   - radar live (Redis + presence WebSocket) → solo finché l'app
- *     resta aperta, si aggiorna in tempo reale
+ * In origine il radar mostrava solo chi aveva l'app aperta in quel
+ * momento (connessione WebSocket viva), e chiudere l'app chiudeva il
+ * check-in. Decisione dell'utente: chi ha fatto check-in resta nella
+ * serata, e nel radar degli altri, anche con l'app chiusa; ne esce
+ * solo per i motivi elencati in populive-checkin-logic.js. Il
+ * WebSocket resta il canale degli aggiornamenti in tempo reale
+ * ("joined"/"left", eventi privati), non decide più chi c'è.
  * ============================================================
  */

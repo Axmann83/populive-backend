@@ -62,6 +62,11 @@ async function getAverageDwellTime({ venueId, fromDate, toDate }, { db }) {
     WHERE arena_sessions.venue_id = $1
       AND arena_sessions.session_date BETWEEN $2 AND $3
       AND checked_out_at IS NOT NULL
+      -- Solo le uscite vere (D14, ottobre 2026): fine serata e scadenza
+      -- delle 24 ore non dicono quando la persona se n'è andata, e con
+      -- l'app chiusa si resta dentro fino a lì. NULL = disconnessione
+      -- del vecchio codice, la stima usata prima.
+      AND (checked_out_reason IS NULL OR checked_out_reason IN ('manual', 'distance', 'other_checkin'))
   `,
     [venueId, fromDate, toDate]
   );

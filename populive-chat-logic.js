@@ -222,14 +222,17 @@ async function setChatKeepPreference({ conversationId, userId, wantsKeep }, { db
 
 // Controlla se la sessione a cui appartiene questa chat è già finita
 // (utile per capire se siamo nella fase "oltre la serata originale").
+// Finita = closed_at valorizzato: dall'ottobre 2026 (D14) una serata
+// chiusa agli ingressi dopo l'orario è ancora in corso, finché non
+// inizia la successiva.
 async function isSessionEnded(arenaSessionId, { db }) {
   const session = await db.query(
     `
-    SELECT is_open_for_checkin FROM arena_sessions WHERE id = $1
+    SELECT closed_at FROM arena_sessions WHERE id = $1
   `,
     [arenaSessionId]
   );
-  return session ? !session.is_open_for_checkin : true;
+  return session ? session.closed_at !== null : true;
 }
 
 /**
