@@ -9,6 +9,8 @@
  * ============================================================
  */
 
+const { notifyUser } = require('./populive-push');
+
 /**
  * Va chiamata dai punti del codice dove chat_unlocked diventa true:
  *   - respondToPulse, quando accept su tier 'super'
@@ -132,6 +134,9 @@ async function sendMessage({ conversationId, senderId, body }, { db, io }) {
     body: body.trim(),
     createdAt: msg.created_at,
   });
+  // Push senza il testo del messaggio (decisione dell'utente, D3):
+  // solo chi ha scritto. Senza await, non blocca mai l'invio.
+  notifyUser({ userId: receiverId, event: 'message', senderId, revealSender: true, data: { conversationId } }, { db });
 
   return { success: true, messageId: msg.id, createdAt: msg.created_at };
 }

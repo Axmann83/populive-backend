@@ -334,6 +334,10 @@ async function deleteAccount({ userId }, { db }) {
 
   await db.query(`DELETE FROM user_hashtags WHERE user_id = $1`, [userId]);
 
+  // Nessuna push a un account eliminato (D3, ottobre 2026): i suoi
+  // dispositivi non devono più ricevere niente.
+  await db.query(`DELETE FROM push_tokens WHERE user_id = $1`, [userId]);
+
   await db.query(
     `
     UPDATE chat_messages SET body = '[messaggio eliminato]'

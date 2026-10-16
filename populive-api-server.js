@@ -111,6 +111,7 @@ const {
   getMissionPreview,
 } = require('./populive-missions-logic');
 const { requestOtp, verifyOtp, verifyToken, deleteAccount } = require('./populive-auth-logic');
+const { registerPushToken, unregisterPushToken } = require('./populive-push');
 
 const app = express();
 app.use(cors()); // permette al frontend (su un altro indirizzo) di chiamare questo backend
@@ -282,6 +283,31 @@ app.get(
   ah(async (req, res) => {
     const user = await db.query(`SELECT is_professional_connector FROM users WHERE id = $1`, [req.userId]);
     res.json({ success: true, isProfessionalConnector: !!(user && user.is_professional_connector) });
+  })
+);
+
+// ------------------------------------------------------------
+// NOTIFICHE PUSH (ottobre 2026, D3) — il token Firebase del
+// dispositivo. L'app lo registra a ogni avvio dopo il login e lo
+// cancella al logout. Basta un token valido: anche durante
+// l'onboarding il dispositivo è già di quella persona.
+// ------------------------------------------------------------
+app.post(
+  '/api/push/token',
+  requireAuthOnly,
+  ah(async (req, res) => {
+    const { token, platform } = req.body;
+    const result = await registerPushToken({ userId: req.userId, token, platform }, { db });
+    res.json(result);
+  })
+);
+
+app.delete(
+  '/api/push/token',
+  requireAuthOnly,
+  ah(async (req, res) => {
+    const result = await unregisterPushToken({ userId: req.userId, token: req.body.token }, { db });
+    res.json(result);
   })
 );
 

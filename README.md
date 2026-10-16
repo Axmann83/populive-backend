@@ -34,7 +34,7 @@ Il server legge **solo** `process.env`: non apre nessun file di configurazione d
 | File | Git | Chi lo legge | Contenuto |
 | --- | --- | --- | --- |
 | `.env.dev` | committato | `npm run dev` e gli script `db:*` | Configurazione di sviluppo, solo valori locali non sensibili (DB Docker, porta 3001, bypass OTP) |
-| `.env` | **ignorato** | solo gli script `db:*` (con precedenza su `.env.dev`) | Opzionale: segreti personali, es. chiavi Stripe/Twilio di test. Per usarlo anche con il server: `node --env-file=.env.dev --env-file=.env populive-api-server.js` |
+| `.env` | **ignorato** | `npm run dev` e gli script `db:*` (con precedenza su `.env.dev`) | Opzionale: segreti personali, es. chiavi Stripe/Twilio di test, `FIREBASE_SERVICE_ACCOUNT`. `npm run dev` lo legge se esiste (`--env-file-if-exists`, Node 22.9 o successivo). **Mai** un `DATABASE_URL` di produzione qui |
 | — | — | `npm start` | **Nessun file.** In produzione le variabili si impostano nel pannello del servizio di hosting |
 
 | Variabile | Obbligatoria | Note |
@@ -49,12 +49,13 @@ Il server legge **solo** `process.env`: non apre nessun file di configurazione d
 | `APP_REVIEW_TEST_PHONE_NUMBER`, `APP_REVIEW_TEST_OTP_CODE` | no | Numero e codice fisso per i revisori degli store (richiede "Custom Verification Code" attivo su Twilio) |
 | `DEV_OTP_BYPASS` | solo locale | `true` = salta Twilio, qualunque numero entra con `APP_REVIEW_TEST_OTP_CODE`. Ignorato se `NODE_ENV=production` |
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | in produzione | Acquisti in-app e webhook. Senza chiavi gli endpoint di pagamento falliscono, tutto il resto funziona |
+| `FIREBASE_SERVICE_ACCOUNT` | in produzione | Notifiche push (Firebase Cloud Messaging, Android e iOS): il JSON dell'account di servizio Firebase (su Railway, il contenuto del file) oppure il percorso del file (in locale, nel `.env`). Senza, le push sono spente e tutto il resto funziona |
 
 ## Script disponibili
 
 | Comando | Cosa fa |
 | --- | --- |
-| `npm run dev` | Server in modalità sviluppo con riavvio automatico (legge `.env.dev`) |
+| `npm run dev` | Server in modalità sviluppo con riavvio automatico (legge `.env.dev` e, se esiste, `.env`) |
 | `npm start` | Server "nudo" per la produzione (le variabili arrivano dall'ambiente) |
 | `npm run setup` | Prima installazione completa: dipendenze, container, schema, seed |
 | `npm run db:up` | Avvia Postgres + Redis e applica le migrazioni mancanti |
@@ -73,7 +74,7 @@ Il server legge **solo** `process.env`: non apre nessun file di configurazione d
 - **Connessione locale:** `postgres://populive:populive@localhost:5432/populive` — Redis su `redis://localhost:6379` (definiti in `docker-compose.yml`).
 - **Schema:** `populive-db-schema.sql` è lo schema base (MVP). `db/migrations/*.sql` contiene le modifiche successive, applicate in ordine alfabetico una sola volta ciascuna (registro nella tabella `schema_migrations`). La migrazione `001` allinea lo schema base a tutto ciò che il codice usa oggi (tabelle `feature_flags`, `architects`, `sponsored_missions`… e le colonne aggiunte nel tempo).
 - **Funzioni SQL:** `current_business_date(venue_id)` dà la data della serata di un locale, in ora italiana (`Europe/Rome`, migrazione `006`) qualunque sia il fuso del database (UTC in locale e su Supabase).
-- **Aggiungere una modifica allo schema:** crea `db/migrations/007_<descrizione>.sql` (numero successivo all'ultimo esistente), poi `npm run db:migrate`. Lancia `npm run db:validate` per verificare che codice e schema siano allineati.
+- **Aggiungere una modifica allo schema:** crea `db/migrations/008_<descrizione>.sql` (numero successivo all'ultimo esistente), poi `npm run db:migrate`. Lancia `npm run db:validate` per verificare che codice e schema siano allineati.
 - **Dati di prova** (`db/seed-dev.sql`): tre locali a Roma, catalogo prodotti, hashtag, default per tipo di locale. Gli utenti non sono nel seed: si creano con il login.
 - **Dashboard admin:** gli endpoint `/api/dashboard/*` richiedono che l'utente sia nella tabella `architects`. Per promuovere il tuo utente locale:
 
@@ -104,6 +105,7 @@ Il progetto è pensato per un hosting tipo **Railway** collegato al repository g
 2. **Non** impostare `DEV_OTP_BYPASS`.
 3. Applicare lo schema al database di produzione: `DATABASE_URL=<url produzione> npm run db:migrate` (oppure eseguire a mano `populive-db-schema.sql` e poi i file in `db/migrations/`). Non caricare `db/seed-dev.sql` in produzione.
 4. Configurare su Stripe il webhook verso `https://<dominio>/api/stripe/webhook`.
+5. Per le notifiche push: `FIREBASE_SERVICE_ACCOUNT` con il contenuto del JSON dell'account di servizio Firebase (progetto `populive-2eaa9`).
 
 ## Struttura
 
@@ -111,6 +113,7 @@ Il progetto è pensato per un hosting tipo **Railway** collegato al repository g
 - `populive-*-logic.js` / `-engine.js` / `-queries.js` — logica pura, riceve `{ db, redis, io }`
 - `populive-db-adapter.js` — wrapper su `pg` (`query` → una riga o `null`, `queryAll` → array)
 - `populive-websocket-rooms.js` — stanze Socket.IO per Arena/utente
+- `populive-push.js` — notifiche push via Firebase (token dei dispositivi in `push_tokens`, migrazione `007`; `POST`/`DELETE /api/push/token`), chiamate senza `await` accanto agli eventi socket di Like, Superlike, Pulse, match e messaggi
 - `populive-scheduler.js` — apertura/chiusura automatica delle serate e uscite dopo 24 ore (vedi sotto)
 - `db/` — migrazioni e seed · `scripts/` — utilità DB (migrate, seed, validate)
 - `docker-compose.yml` — Postgres 16 + Redis 7 per lo sviluppo locale

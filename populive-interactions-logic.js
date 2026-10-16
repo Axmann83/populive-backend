@@ -27,6 +27,11 @@ const { openChatConversation } = require('./populive-chat-logic');
 // (awardTableSpendingBonus prima non era collegata a nessun
 // endpoint).
 const { reflectPointsToConnector, placeDiscoveryMarker } = require('./populive-connector-engine');
+// Notifiche push (D3, ottobre 2026): chiamate SENZA await accanto agli
+// eventi socket, non lanciano mai errori (v. populive-push.js). La
+// push va solo a chi subisce l'evento, mai a chi lo ha appena
+// causato (ha l'app aperta in quel momento).
+const { notifyUser } = require('./populive-push');
 
 // ------------------------------------------------------------
 // PARTE 0 — Like / Superlike semplici (senza Pulse allegata)
@@ -327,6 +332,33 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type, via
     }
   }
 
+  // Push al destinatario: se il Like ha fatto scattare il match basta
+  // quella (un "Qualcuno ti ha messo Like" subito seguito da "È un
+  // match con…" sarebbe ridondante, e svelerebbe comunque chi era).
+  if (reciprocalMatch) {
+    notifyUser(
+      {
+        userId: receiverId,
+        event: 'match',
+        senderId,
+        revealSender: true,
+        data: { conversationId: matchConversationId },
+      },
+      { db }
+    );
+  } else {
+    notifyUser(
+      {
+        userId: receiverId,
+        event: type === 'superlike' ? 'superlike' : 'like',
+        senderId,
+        revealSender: type === 'superlike',
+        data: { interactionId: newInteraction.id },
+      },
+      { db }
+    );
+  }
+
   return { success: true, countedForPoints: countsForPoints, senderEarnedPoints, reciprocalMatch, matchConversationId };
 }
 
@@ -416,6 +448,16 @@ async function respondToSuperlike({ interactionId, receiverId, action }, { db, i
       withUserId: interaction.sender_id,
       conversationId: chat.conversationId,
     });
+    notifyUser(
+      {
+        userId: interaction.sender_id,
+        event: 'match',
+        senderId: receiverId,
+        revealSender: true,
+        data: { conversationId: chat.conversationId },
+      },
+      { db }
+    );
 
     return { success: true, action: 'accept', conversationId: chat.conversationId };
   }
@@ -784,6 +826,17 @@ async function createPulseRecord(
     senderPhotoUrl: superSenderProfile?.photoUrl || null,
     senderAvatarEmoji: superSenderProfile?.avatarEmoji || null,
   });
+  notifyUser(
+    {
+      userId: receiverId,
+      event: 'pulse',
+      senderId,
+      revealSender: revealsIdentity,
+      drinkName,
+      data: { pulseId: pulse.id },
+    },
+    { db }
+  );
 
   return { success: true, pulseId: pulse.id };
 }
@@ -937,6 +990,16 @@ async function respondToPulse({ pulseId, receiverId, action }, { db, io }) {
         withUserId: pulse.sender_id,
         conversationId: chatConversationId,
       });
+      notifyUser(
+        {
+          userId: pulse.sender_id,
+          event: 'match',
+          senderId: receiverId,
+          revealSender: true,
+          data: { conversationId: chatConversationId },
+        },
+        { db }
+      );
     }
 
     return {
@@ -1033,6 +1096,16 @@ async function attemptGuess({ pulseId, receiverId, guessedUserId }, { db, io }) 
       viaGuessGame: true,
       conversationId: chat.conversationId,
     });
+    notifyUser(
+      {
+        userId: pulse.sender_id,
+        event: 'match',
+        senderId: receiverId,
+        revealSender: true,
+        data: { conversationId: chat.conversationId },
+      },
+      { db }
+    );
 
     // Bonus punti per un match riuscito — ora a ENTRAMBI (prima solo
     // al ricevente), passando dal vero motore dei moltiplicatori

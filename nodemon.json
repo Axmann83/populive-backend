@@ -2,7 +2,7 @@
   "watch": ["*.js", ".env.dev"],
   "ext": "js,json,env",
   "ignore": ["node_modules/", "scripts/"],
-  "execMap": { "js": "node --env-file=.env.dev" },
+  "execMap": { "js": "node --env-file=.env.dev --env-file-if-exists=.env" },
   "script": "populive-api-server.js",
   "delay": 300,
   "events": {
