@@ -11,7 +11,32 @@
  * ============================================================
  */
 
+const crypto = require('crypto');
 const { Server } = require('socket.io');
+
+// ------------------------------------------------------------
+// CODICE BLUETOOTH DELLA SERATA (ottobre 2026, D4 strada B)
+// ------------------------------------------------------------
+// Con l'app aperta ogni telefono nel radar trasmette via Bluetooth
+// un codice anonimo e ascolta quelli degli altri, per mettere in
+// testa chi è fisicamente vicino adesso. Il codice è calcolato qui,
+// mai salvato: HMAC del segreto JWT (con un prefisso dedicato, così
+// non coincide mai con niente di quello che il segreto firma già) su
+// persona + serata, troncato a 6 byte → 8 caratteri base64url, il
+// massimo che iOS fa stare nel nome trasmesso. Cambia a ogni serata,
+// quindi non permette di seguire qualcuno da una sera all'altra; chi
+// non è nella serata lo vede passare ma non sa di chi è. Lo ricevono
+// solo i telefoni nella stanza del radar, accanto all'id della
+// persona: l'abbinamento e la vicinanza si fanno sul telefono, al
+// server non torna niente.
+function proximityCode(userId, arenaSessionId) {
+  return crypto
+    .createHmac('sha256', `populive-ble:${process.env.JWT_SECRET}`)
+    .update(`${arenaSessionId}:${userId}`)
+    .digest()
+    .subarray(0, 6)
+    .toString('base64url');
+}
 
 // Stesso controllo di populive-checkin-logic.js (che però importa
 // questo file: copiato qui per non creare un import circolare). Un id
@@ -122,6 +147,7 @@ function setupWebSocket(httpServer, { db }) {
         broadcastToOthers(io, room, userId, 'presence_update', {
           type: 'joined',
           userId,
+          proximityCode: proximityCode(userId, arenaSessionId),
         });
       }
 
@@ -152,10 +178,20 @@ function setupWebSocket(httpServer, { db }) {
       `,
         [arenaSessionId, userId]
       );
-      socket.emit('radar_snapshot', { userIds: present.map((row) => row.user_id) });
+      // `proximityCodes` (D4) accanto a `userIds`, che resta com'era per
+      // le versioni dell'app che non conoscono il Bluetooth.
+      const proximityCodes = Object.fromEntries(
+        present.map((row) => [row.user_id, proximityCode(row.user_id, arenaSessionId)])
+      );
+      socket.emit('radar_snapshot', { userIds: present.map((row) => row.user_id), proximityCodes });
 
-      // Confermiamo al telefono stesso che è entrato correttamente
-      socket.emit('joined_arena_ack', { arenaSessionId });
+      // Confermiamo al telefono stesso che è entrato correttamente,
+      // con il codice Bluetooth da trasmettere (nessuno in Ghost Mode:
+      // chi è invisibile nel radar non deve farsi trovare nemmeno così).
+      socket.emit('joined_arena_ack', {
+        arenaSessionId,
+        proximityCode: isGhost ? null : proximityCode(userId, arenaSessionId),
+      });
     });
 
     // Evento dedicato per chi vuole solo la propria stanza privata
