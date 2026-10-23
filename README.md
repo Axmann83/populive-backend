@@ -42,7 +42,7 @@ Il server legge **solo** `process.env`: non apre nessun file di configurazione d
 | `PORT` | no | Default `3000`. In locale `3001` (da `.env.dev`); su Railway viene assegnata automaticamente |
 | `DATABASE_URL` | **sì** | Stringa di connessione Postgres. Se manca il server non parte |
 | `REDIS_URL` | **sì** | Stringa di connessione Redis |
-| `JWT_SECRET` | **sì** | Firma dei token di sessione. In produzione una stringa lunga e casuale |
+| `JWT_SECRET` | **sì** | Firma dei token di sessione e base dei codici Bluetooth del radar (cambiarla fa uscire tutti e cambia i codici, innocuo). In produzione una stringa lunga e casuale |
 | `NODE_ENV` | consigliata | **Imposta `production` in produzione**: disattiva per costruzione il bypass OTP anche se `DEV_OTP_BYPASS` fosse impostato per errore |
 | `FRONTEND_BASE_URL` | no | URL del frontend, usato da Stripe per i redirect dopo il pagamento |
 | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_VERIFY_SERVICE_SID` | in produzione | Invio e verifica OTP via SMS |
@@ -112,7 +112,7 @@ Il progetto è pensato per un hosting tipo **Railway** collegato al repository g
 - `populive-api-server.js` — entry point: endpoint HTTP, middleware auth, avvio scheduler
 - `populive-*-logic.js` / `-engine.js` / `-queries.js` — logica pura, riceve `{ db, redis, io }`
 - `populive-db-adapter.js` — wrapper su `pg` (`query` → una riga o `null`, `queryAll` → array)
-- `populive-websocket-rooms.js` — stanze Socket.IO per Arena/utente
+- `populive-websocket-rooms.js` — stanze Socket.IO per Arena/utente; calcola anche il codice Bluetooth anonimo della serata (`proximityCode`, HMAC di `JWT_SECRET` su persona + serata, mai salvato) che l'app trasmette per la vicinanza nel radar, mandato in `joined_arena_ack`, `radar_snapshot` e `presence_update`
 - `populive-push.js` — notifiche push via Firebase (token dei dispositivi in `push_tokens`, migrazione `007`; `POST`/`DELETE /api/push/token`), chiamate senza `await` accanto agli eventi socket di Like, Superlike, Pulse, match e messaggi
 - `populive-scheduler.js` — apertura/chiusura automatica delle serate e uscite dopo 24 ore (vedi sotto)
 - `db/` — migrazioni e seed · `scripts/` — utilità DB (migrate, seed, validate)
