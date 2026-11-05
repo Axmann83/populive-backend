@@ -355,6 +355,43 @@ async function getPublicProfile({ userId, arenaSessionId, viewerId }, { db }) {
     }
   }
 
+  // Stato tra chi guarda e questa persona (B3, B11 — novembre 2026): il
+  // profilo a tutto schermo spegne Like e Superlike quando non servono
+  // più (chat già aperta = match) o sono già stati mandati stasera, e
+  // mostra il Superlike come spento a saldo zero. "Match" = chat aperta
+  // perché è finché la chat è aperta che vale il blocco permanente da
+  // match (blockBothDirectionsPermanently): l'invio verrebbe rifiutato
+  // come blocked_by_receiver, che il frontend tace apposta.
+  let relation = null;
+  if (viewerId && viewerId !== userId) {
+    const activeChat = await db.query(
+      `
+      SELECT 1 FROM chat_conversations
+      WHERE ((user_a_id = $1 AND user_b_id = $2) OR (user_a_id = $2 AND user_b_id = $1))
+        AND closed_at IS NULL
+      LIMIT 1
+    `,
+      [userId, viewerId]
+    );
+    const sentTonight = arenaSessionId
+      ? await db.query(
+          `
+          SELECT bool_or(type = 'like') AS like_sent, bool_or(type = 'superlike') AS superlike_sent
+          FROM interactions
+          WHERE sender_id = $1 AND receiver_id = $2 AND arena_session_id = $3
+        `,
+          [viewerId, userId, arenaSessionId]
+        )
+      : null;
+    const viewer = await db.query(`SELECT superlike_balance FROM users WHERE id = $1`, [viewerId]);
+    relation = {
+      matched: !!activeChat,
+      likeSentTonight: !!sentTonight?.like_sent,
+      superlikeSentTonight: !!sentTonight?.superlike_sent,
+      viewerSuperlikeBalance: viewer?.superlike_balance ?? 0,
+    };
+  }
+
   return {
     success: true,
     profile: {
@@ -378,6 +415,7 @@ async function getPublicProfile({ userId, arenaSessionId, viewerId }, { db }) {
       instantInfluencerCategory: finalInstantInfluencerCategory,
       sponsoredProducts: finalSponsoredProducts,
       pastMatch,
+      relation,
     },
   };
 }
