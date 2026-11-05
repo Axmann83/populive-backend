@@ -929,10 +929,13 @@ app.post(
 // ------------------------------------------------------------
 app.get(
   '/api/venues/:venueId/report',
+  // Protetto dal 5/11/2026: prima rispondeva a chiunque conoscesse
+  // l'indirizzo, con dati commerciali del locale (arrivi, permanenza,
+  // drink, presenze, ritorni). Oggi solo gli Architetti; quando i
+  // proprietari dei locali avranno un accesso loro, andrà aperto anche
+  // a chi gestisce QUEL locale.
+  requireArchitect,
   ah(async (req, res) => {
-    // NOTA: in produzione questo endpoint va protetto — solo il
-    // team o il proprietario autenticato del locale specifico deve
-    // poterlo chiamare, non chiunque conosca l'indirizzo.
     const { fromDate, toDate } = req.query;
     const result = await generateVenueReport({ venueId: req.params.venueId, fromDate, toDate }, { db });
     res.json(result);
