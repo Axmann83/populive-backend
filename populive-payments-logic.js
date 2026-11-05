@@ -169,10 +169,7 @@ async function initiatePurchase({ userId, productId, arenaSessionId }, { db }) {
  * STEP 1 — Punto d'ingresso unico per "voglio inviare questa Pulse".
  * Decide da solo se serve pagare o no, e agisce di conseguenza.
  */
-async function initiatePulsePurchase(
-  { senderId, receiverId, arenaSessionId, drinkProductId, tier },
-  { db, redis, io }
-) {
+async function initiatePulsePurchase({ senderId, receiverId, arenaSessionId, drinkProductId }, { db, redis, io }) {
   // Stesso controllo reale di sendInteraction — nessuno dovrebbe
   // poter "comprare" una Pulse per se stesso, né tantomeno pagare
   // davvero per farlo.
@@ -194,28 +191,12 @@ async function initiatePulsePurchase(
   const purchaserTestRow = await db.query(`SELECT is_test_account FROM users WHERE id = $1`, [senderId]);
   if (blocked && !purchaserTestRow?.is_test_account) return { success: false, reason: 'blocked_by_receiver' };
 
-  // Sia "super" che "simple" svelano subito l'identità (25/8,
-  // decisione esplicita: un'offerta vera richiede che si sappia da
-  // chi arriva) — entrambi devono quindi rispettare le stesse
-  // preferenze di contatto del destinatario. Il saldo Superlike
-  // invece resta un vincolo SOLO per "super", mai per "simple" (che
-  // esiste apposta per essere slegato da quel credito).
-  if (tier === 'super' || tier === 'simple') {
-    const check = await canSendDirectContact({ senderId, receiverId }, { db });
-    if (!check.allowed) return { success: false, reason: check.reason };
-  }
-
-  if (tier === 'super') {
-    // Un Pulse+Superlike richiede ANCHE un Superlike vero da spendere
-    // — controllo qui SUBITO (senza ancora scalarlo: lo faremo solo
-    // quando la Pulse nascerà per davvero, dentro createPulseRecord,
-    // per non perdere un Superlike se poi il pagamento del Pulse
-    // fallisce o viene abbandonato su Stripe).
-    const senderSuperlikes = await db.query(`SELECT superlike_balance FROM users WHERE id = $1`, [senderId]);
-    if (!senderSuperlikes || senderSuperlikes.superlike_balance <= 0) {
-      return { success: false, reason: 'superlike_balance_exhausted' };
-    }
-  }
+  // La Pulse svela subito chi la manda (25/8, decisione esplicita:
+  // un'offerta vera richiede che si sappia da chi arriva), quindi
+  // rispetta le preferenze di contatto del destinatario. Una sola
+  // variante dal novembre 2026 (A5), senza Superlike allegato.
+  const check = await canSendDirectContact({ senderId, receiverId }, { db });
+  if (!check.allowed) return { success: false, reason: check.reason };
 
   // Il prezzo e il nome del drink vengono SEMPRE recuperati qui,
   // mai passati dal frontend — è l'unico modo per essere sicuri
@@ -251,7 +232,6 @@ async function initiatePulsePurchase(
         arenaSessionId,
         drinkName: drink.name,
         priceCents,
-        tier,
         paymentStatus: 'test',
       },
       { db, redis, io }
@@ -270,7 +250,6 @@ async function initiatePulsePurchase(
         arenaSessionId,
         drinkName: drink.name,
         priceCents,
-        tier,
         paymentStatus: 'free',
       },
       { db, redis, io }
@@ -290,7 +269,6 @@ async function initiatePulsePurchase(
         arenaSessionId,
         drinkName: drink.name,
         priceCents,
-        tier,
         paymentStatus: 'prepaid',
       },
       { db, redis, io }
@@ -321,7 +299,6 @@ async function initiatePulsePurchase(
       arenaSessionId: arenaSessionId || '',
       drinkName: drink.name,
       priceCents: String(priceCents),
-      tier,
     },
     success_url: `${FRONTEND_BASE_URL}/?pulse_sent=1`,
     cancel_url: `${FRONTEND_BASE_URL}/?pulse_cancelled=1`,
@@ -383,7 +360,6 @@ async function handleStripeWebhook(rawBody, signature, { db, redis, io }) {
           arenaSessionId: m.arenaSessionId || null,
           drinkName: m.drinkName,
           priceCents: parseInt(m.priceCents),
-          tier: m.tier,
           paymentStatus: 'paid',
           stripeCheckoutSessionId: session.id,
         },

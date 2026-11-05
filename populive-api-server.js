@@ -30,7 +30,6 @@ const {
   sendInteraction,
   trackProfileView,
   respondToPulse,
-  attemptGuess,
   respondToSuperlike,
   getReceivedPulses,
   getSentPulses,
@@ -604,14 +603,13 @@ app.post(
   '/api/pulses/send',
   requireOnboarded,
   ah(async (req, res) => {
-    const { receiverId, arenaSessionId, drinkProductId, tier } = req.body;
+    const { receiverId, arenaSessionId, drinkProductId } = req.body;
     const result = await initiatePulsePurchase(
       {
         senderId: req.userId,
         receiverId,
         arenaSessionId,
         drinkProductId,
-        tier,
       },
       deps
     );
@@ -926,23 +924,6 @@ app.post(
   })
 );
 
-app.post(
-  '/api/pulses/:pulseId/guess',
-  requireOnboarded,
-  ah(async (req, res) => {
-    const { guessedUserId } = req.body;
-    const result = await attemptGuess(
-      {
-        pulseId: req.params.pulseId,
-        receiverId: req.userId,
-        guessedUserId,
-      },
-      deps
-    );
-    res.json(result);
-  })
-);
-
 // ------------------------------------------------------------
 // REPORT PER I LOCALI (v. populive-venue-insights.js)
 // ------------------------------------------------------------
@@ -1243,27 +1224,6 @@ app.post(
       [venueId, req.params.pulseId]
     );
     res.json({ success: true });
-  })
-);
-
-// ------------------------------------------------------------
-// CANDIDATI PER IL MINIGIOCO PULSE+LIKE — profili di base di chi
-// ha fatto check-in in questa Arena (nome, foto), usati per la
-// schermata "indovina chi ti ha inviato la Pulse".
-// ------------------------------------------------------------
-app.get(
-  '/api/arenas/:arenaSessionId/guess-candidates',
-  ah(async (req, res) => {
-    const candidates = await db.queryAll(
-      `
-    SELECT DISTINCT u.id AS user_id, u.display_name, u.avatar_emoji, u.photo_url
-    FROM checkins c
-    JOIN users u ON u.id = c.user_id
-    WHERE c.arena_session_id = $1
-  `,
-      [req.params.arenaSessionId]
-    );
-    res.json({ success: true, candidates });
   })
 );
 

@@ -16,17 +16,13 @@ const BASE_POINTS = {
   profile_view: 2, // solo la prima visita per coppia visitatore/visitato/serata, e solo le prime N persone diverse viste a testa (v. MAX_DISTINCT_VIEWS_PER_SESSION)
   like_received: 5, // solo i primi N like/giorno per ricevente contano (rate limit già deciso)
   superlike_received: 8,
-  pulse_standalone: 10,
-  pulse_like: 10, // + bonus separato per ENTRAMBI se vince il minigioco (vedi pulse_like_match sotto)
-  pulse_like_match: 5, // bonus al RICEVENTE per un match riuscito nel minigioco — +30% incluso via MULTIPLIERS.guess_match_bonus (5*1.3≈7), si somma correttamente a eventuali altri bonus (Premium, Founder, ecc.). Abbassato da 10 a 5: con 10 il totale (base pulse_like 10 + bonus 13) arrivava a 23, troppo vicino/sopra al Pulse+Superlike.
-  like_match: 5, // bonus a ENTRAMBI per un match tra Like semplici (reciprocità) — FISSO, niente +30%: qui non c'è nessun minigioco da skippare, il match è automatico appena l'altro ricambia.
-  // Pulse "simple" (identità visibile, senza Superlike): mancava del
-  // tutto (bug B13, 2/10) — ogni invio andava in errore DOPO aver già
-  // scritto la Pulse, senza notifica né punti. 15/8 deciso dall'utente
-  // il 2/10: a metà tra standalone/+Like e +Superlike, che resta il
-  // massimo perché costa anche un Superlike.
+  like_match: 5, // bonus a ENTRAMBI per un match tra Like semplici (reciprocità) — FISSO, il match è automatico appena l'altro ricambia.
+  // Pulse (identità visibile): 15/8 deciso dall'utente il 2/10 (bug
+  // B13). Dal novembre 2026 è l'unica variante (A5): tolte
+  // pulse_standalone, pulse_like (con il minigioco e il suo bonus
+  // pulse_like_match) e pulse_super. Le righe vecchie di
+  // points_ledger con quei source restano valide (populive-ranking-cap.js).
   pulse_simple: 15,
-  pulse_super: 20, // il valore più alto tra tutte le interazioni dirette, apposta — è l'unica garantita al 100% (nessun minigioco, nessuna fortuna) e richiede una risorsa vera in più (il Superlike). Margine modesto sopra al tetto massimo teorico del Pulse+Like con match riuscito (17).
   mission_completed: 15, // missione sponsorizzata da brand
   connector_discovery_bonus: 18, // Top Connector: bonus per aver "scoperto" un profilo che poi esplode
   // Top Connector — bonus "talent scout" di fine serata (17/9, idea
@@ -67,22 +63,9 @@ const SENDER_POINTS = {
   profile_view: 1,
   like_received: 2,
   superlike_received: 3,
-  pulse_standalone: 4,
-  pulse_like: 4,
   pulse_simple: 8, // v. BASE_POINTS (bug B13)
-  pulse_super: 14, // stesso principio: sopra il tetto massimo teorico lato mittente del Pulse+Like con match (11).
-  pulse_like_match: 7, // 5 base + 30% già incluso (5*1,3=6,5, arrotondato a 7) — abbassato da 13, stesso motivo del lato ricevente.
-  like_match: 5, // FISSO, stesso valore del ricevente — nessun +30% qui.
+  like_match: 5, // FISSO, stesso valore del ricevente.
 };
-
-// Bonus a ENTRAMBI se il minigioco Pulse+Like va a segno (match) —
-// non solo al destinatario che gioca, come succedeva prima: chi ha
-// mandato la Pulse partecipa comunque al risultato del suo gesto.
-// Il +30% (rispetto ai 10 punti base) premia il fatto di NON aver
-// skippato il minigioco — un incentivo in più a giocarlo davvero.
-// (il vecchio valore fisso GUESS_GAME_BONUS_POINTS=8, solo per il
-// ricevente e fuori dal motore dei moltiplicatori, è stato sostituito
-// da questo — v. BASE_POINTS.pulse_like_match / SENDER_POINTS.pulse_like_match)
 
 // Tetto anti-spam sulle visite profilo: oltre le prime N persone
 // DIVERSE viste in una sessione, le visite continuano a funzionare
@@ -98,7 +81,6 @@ const MULTIPLIERS = {
   consent_per_toggle: 0.05, // +5% per ciascuna delle 3 scelte facoltative attive in Impostazioni (missioni sponsorizzate/bacheca storica/ricevi Pulse) — cumulabile fino a +15% con tutte e tre attive. Si applica SIA ai punti che ricevi SIA a quelli che guadagni inviando, ed è sempre calcolato al momento (mai "congelato"): se spunti o togli una casella, il moltiplicatore cambia dalla prossima interazione in poi, coerente con la sua natura reversibile.
   verified_bonus: 0.05, // +5% per chi ha il profilo Verificato — a differenza delle 3 scelte sopra, questo NON si accende/spegne mai (badge acquistato una volta), quindi si SOMMA in modo semplice sopra gli altri invece di moltiplicarsi insieme — su 10 punti base: 15% (tutte e 3 le scelte) + 5% (verificato) = 2 punti bonus totali, non 2,075. Vale meno proprio perché non è reversibile come le altre.
   historical_board_bonus: 1.3, // +30% sui punti guadagnati da un Superlike o una visita profilo che arrivano dalla Bacheca Storica — incentivo a comparire lì (consenso facoltativo appears_in_historical_search). Si applica SOLO a questi due source, moltiplicato in sequenza con gli altri (come premium), non sommato come il bonus Verificato — qui non c'è motivo di trattarlo diversamente, è calcolato per ogni singolo evento, non legato a uno stato permanente.
-  guess_match_bonus: 1.3, // +30% sui punti del RICEVENTE per un match riuscito nel minigioco Pulse+Like — premia chi lo gioca fino in fondo invece di skipparlo. Si applica SOLO al source pulse_like_match, moltiplicato in sequenza con gli altri come premium/historical_board_bonus.
 };
 
 // Limite specifico sul LIKE INVIATO (non ricevuto): solo i primi N
@@ -217,12 +199,6 @@ async function computePoints({ receiverId, source, senderId, arenaSessionId, via
   // vivo stasera.
   if (viaHistoricalBoard && (source === 'superlike_received' || source === 'profile_view')) {
     localPoints = Math.round(localPoints * MULTIPLIERS.historical_board_bonus);
-  }
-
-  // Bonus match riuscito nel minigioco Pulse+Like — SOLO per questo
-  // source specifico, mai per altri.
-  if (source === 'pulse_like_match') {
-    localPoints = Math.round(localPoints * MULTIPLIERS.guess_match_bonus);
   }
 
   // Bonus scelte facoltative — si applica per ultimo, sopra a tutti

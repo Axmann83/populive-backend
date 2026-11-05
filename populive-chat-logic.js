@@ -13,8 +13,7 @@ const { notifyUser } = require('./populive-push');
 
 /**
  * Va chiamata dai punti del codice dove chat_unlocked diventa true:
- *   - respondToPulse, quando accept su tier 'super'
- *   - attemptGuess, quando il match riesce (tier 'like')
+ *   - respondToPulse, quando una Pulse viene accettata
  *   - sendInteraction/accettazione di un Superlike semplice
  * Crea la conversazione se non esiste già per questa coppia in
  * questa sessione (evita duplicati con lo UNIQUE dello schema).

@@ -712,48 +712,30 @@ async function canSendDirectContact({ senderId, receiverId }, { db }) {
 // e dal webhook Stripe (per il caso pagato, solo a conferma avvenuta).
 // ------------------------------------------------------------
 async function createPulseRecord(
-  { senderId, receiverId, arenaSessionId, drinkName, priceCents, tier, paymentStatus, stripeCheckoutSessionId },
-  { db, redis, io }
+  { senderId, receiverId, arenaSessionId, drinkName, priceCents, paymentStatus, stripeCheckoutSessionId },
+  { db, io }
 ) {
-  // Il Superlike allegato si scala SOLO qui — il momento vero in cui
-  // la Pulse nasce per davvero, indipendentemente da quale dei
-  // percorsi di pagamento l'ha portata fin qui (test/gratis/
-  // pre-pagato/Stripe). Il controllo "ce n'è almeno uno" era già
-  // stato fatto prima, qui lo consumiamo per davvero.
-  if (tier === 'super') {
-    await db.query(`UPDATE users SET superlike_balance = superlike_balance - 1 WHERE id = $1`, [senderId]);
-  }
-
-  let guessesRemaining = null;
-  if (tier === 'like') {
-    guessesRemaining = await computeGuessAllowance(arenaSessionId, { redis });
-  }
+  // Una sola Pulse dal novembre 2026 (decisione A5): sempre 'simple',
+  // che svela subito chi la manda e all'accettazione apre la chat.
+  // Le varianti 'standalone' (anonima), 'like' (con il minigioco
+  // "indovina chi") e 'super' (con un Superlike) sono state tolte; le
+  // righe vecchie nel database restano leggibili (v. respondToPulse e
+  // getUserPulses). Fissata qui, nell'unico punto in cui una Pulse
+  // nasce: vale anche per i pagamenti Stripe partiti prima del cambio.
+  const tier = 'simple';
 
   const pulse = await db.query(
     `
     INSERT INTO pulses (sender_id, receiver_id, arena_session_id, drink_type,
-                        price_cents, tier, guesses_remaining, payment_status, stripe_checkout_session_id)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                        price_cents, tier, payment_status, stripe_checkout_session_id)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
     RETURNING id
   `,
-    [
-      senderId,
-      receiverId,
-      arenaSessionId,
-      drinkName,
-      priceCents,
-      tier,
-      guessesRemaining,
-      paymentStatus,
-      stripeCheckoutSessionId || null,
-    ]
+    [senderId, receiverId, arenaSessionId, drinkName, priceCents, tier, paymentStatus, stripeCheckoutSessionId || null]
   );
 
   // GHOST MODE — stessa regola di Like/Superlike: se il mittente è
-  // un fantasma, si rivela SOLO nel radar di chi riceve la Pulse,
-  // qualunque sia la variante (anche standalone/+Like, che restano
-  // comunque anonime come interazione — qui parliamo solo di
-  // farlo comparire come profilo tra i candidati).
+  // un fantasma, si rivela SOLO nel radar di chi riceve la Pulse.
   const pulseSenderGhostRow = await db.query(`SELECT ghost_mode_enabled FROM users WHERE id = $1`, [senderId]);
   if (pulseSenderGhostRow?.ghost_mode_enabled) {
     io.to(`user_${receiverId}`).emit('ghost_revealed', { userId: senderId });
@@ -807,31 +789,25 @@ async function createPulseRecord(
   );
 
   // Notifica privata in tempo reale SOLO al destinatario — mai alla
-  // stanza dell'Arena intera, questo è un evento personale.
-  // Il payload NON include mai l'identità del mittente per i tier
-  // "standalone" e "like" (resta il backend, tramite sender_id nel
-  // database, a saperlo — il frontend riceve solo ciò che è coerente
-  // con la variante scelta). "simple" svela l'identità esattamente
-  // come "super" (25/8, stessa logica, semplicemente senza legame
-  // col Superlike) — un'offerta vera richiede che si sappia da chi
-  // arriva, decisione esplicita dell'utente.
-  const revealsIdentity = tier === 'super' || tier === 'simple';
-  const superSenderProfile = revealsIdentity ? await getSenderProfile(senderId, { db }) : null;
+  // stanza dell'Arena intera, questo è un evento personale. La Pulse
+  // svela sempre chi la manda: un'offerta vera richiede che si sappia
+  // da chi arriva (decisione esplicita dell'utente, 25/8).
+  const senderProfile = await getSenderProfile(senderId, { db });
   io.to(`user_${receiverId}`).emit('pulse_received', {
     pulseId: pulse.id,
     tier,
     drinkType: drinkName,
-    senderId: revealsIdentity ? senderId : null,
-    senderName: superSenderProfile?.displayName || null,
-    senderPhotoUrl: superSenderProfile?.photoUrl || null,
-    senderAvatarEmoji: superSenderProfile?.avatarEmoji || null,
+    senderId,
+    senderName: senderProfile?.displayName || null,
+    senderPhotoUrl: senderProfile?.photoUrl || null,
+    senderAvatarEmoji: senderProfile?.avatarEmoji || null,
   });
   notifyUser(
     {
       userId: receiverId,
       event: 'pulse',
       senderId,
-      revealSender: revealsIdentity,
+      revealSender: true,
       drinkName,
       data: { pulseId: pulse.id },
     },
@@ -848,18 +824,6 @@ async function getSenderProfile(senderId, { db }) {
     photoUrl: sender.photo_url,
     avatarEmoji: sender.avatar_emoji || '🙂',
   };
-}
-
-// Regola di scaling concordata: profili mostrati nel mini-gioco e
-// tentativi concessi crescono con la dimensione dell'Arena, ma i
-// tentativi restano sempre sotto il numero di profili mostrati.
-async function computeGuessAllowance(arenaSessionId, { redis }) {
-  const arenaSize = await redis.scard(`arena:${arenaSessionId}:radar`);
-
-  if (arenaSize <= 15) return 1; // Arena piccola: massima tensione, stile Happn
-  if (arenaSize <= 50) return 2;
-  if (arenaSize <= 100) return 3;
-  return 4; // Arena molto grande: mai oltre 4, anche se enorme
 }
 
 // ------------------------------------------------------------
@@ -922,17 +886,12 @@ async function respondToPulse({ pulseId, receiverId, action }, { db, io }) {
   }
 
   // --- ACCETTA ---
-  // Vale per TUTTI e tre i tier, incluso "like": accettare garantisce
-  // sempre la consumazione, a prescindere dall'esito del minigioco.
-  // Per il tier "like", il minigioco (attemptGuess) resta disponibile
-  // DOPO l'accettazione, ma è solo un bonus per sbloccare la chat —
-  // non condiziona mai il possesso della Pulse già accettata.
+  // Accettare garantisce sempre la consumazione. La Pulse 'simple'
+  // (l'unica dal novembre 2026) svela già chi la manda, quindi
+  // l'accettazione apre anche la chat; le vecchie anonime
+  // ('standalone', 'like') rimaste nel database danno solo il drink.
   if (action === 'accept') {
     const redeemCode = generateRedeemCode();
-    // "simple" si comporta esattamente come "super" qui: svela già
-    // subito, quindi l'accettazione apre la chat allo stesso modo
-    // (25/8) — l'unica differenza tra i due è a monte, nell'invio
-    // (nessun legame col saldo Superlike).
     const opensChatOnAccept = pulse.tier === 'super' || pulse.tier === 'simple';
     await db.query(
       `
@@ -946,27 +905,20 @@ async function respondToPulse({ pulseId, receiverId, action }, { db, io }) {
     );
 
     // Anti-abuso punti: stesso principio già applicato a Like
-    // reciproco e Superlike — accettare una Pulse (in QUALUNQUE
-    // variante, anche standalone/+like) è un "sì" vero, non deve
-    // poter essere ripetuto all'infinito solo per far salire i
-    // punti. Vale per tutti i tier allo stesso modo.
+    // reciproco e Superlike — accettare una Pulse è un "sì" vero, non
+    // deve poter essere ripetuto all'infinito solo per far salire i
+    // punti.
     await blockBothDirectionsPermanently({ userAId: pulse.sender_id, userBId: receiverId }, { db });
 
     // I punti per aver ricevuto la Pulse sono già stati assegnati al
     // momento della ricezione vera (in createPulseRecord) — allineato
     // a Like/Superlike, che danno sempre punti al ricevimento, mai
     // legati alla decisione presa dopo. Qui non si riassegnano.
-    // standalone → chat_unlocked resta false (nessun contatto, solo il drink)
-    // super/simple → chat_unlocked true da subito (il profilo era già visibile)
-    // like       → chat_unlocked resta false per ora: si sblocca SOLO
-    //              vincendo il minigioco in attemptGuess, che però non
-    //              tocca mai lo status della Pulse (già "accepted" qui)
 
-    // Pulse+Superlike o Pulse semplice: l'accettazione apre la chat
-    // di default (il profilo era già visibile prima di decidere) —
-    // creiamo davvero la conversazione, poi avvisiamo in tempo reale
-    // entrambe le parti, sempre in privato, mai sulla stanza
-    // condivisa dell'Arena.
+    // L'accettazione apre la chat (il profilo era già visibile prima
+    // di decidere): creiamo davvero la conversazione, poi avvisiamo in
+    // tempo reale entrambe le parti, sempre in privato, mai sulla
+    // stanza condivisa dell'Arena.
     let chatConversationId = null;
     if (opensChatOnAccept) {
       const chat = await openChatConversation(
@@ -1008,146 +960,10 @@ async function respondToPulse({ pulseId, receiverId, action }, { db, io }) {
       chatUnlocked: opensChatOnAccept,
       conversationId: chatConversationId,
       redeemCode,
-      canStillPlayGuessGame: pulse.tier === 'like', // il frontend sa se offrire il minigioco dopo
     };
   }
 
   return { success: false, reason: 'invalid_action' };
-}
-
-// ------------------------------------------------------------
-// PARTE 3 — Mini-gioco della Pulse + Like: tentativo di indovinare
-// ------------------------------------------------------------
-// NOTA IMPORTANTE: questa funzione si chiama SOLO dopo che la Pulse
-// è già stata accettata (status = 'accepted'). Non tocca mai il
-// possesso della consumazione — decide solo se si sblocca la chat.
-// Chi perde tutti i tentativi tiene comunque la Pulse già sua.
-async function attemptGuess({ pulseId, receiverId, guessedUserId }, { db, io }) {
-  const pulse = await db.query(`SELECT * FROM pulses WHERE id = $1`, [pulseId]);
-  if (!pulse || pulse.receiver_id !== receiverId || pulse.tier !== 'like') {
-    return { success: false, reason: 'invalid_request' };
-  }
-  if (pulse.status !== 'accepted') {
-    return { success: false, reason: 'must_accept_pulse_first' };
-  }
-  if (pulse.chat_unlocked) {
-    return { success: false, reason: 'already_unlocked' };
-  }
-  if (pulse.guesses_remaining <= 0) {
-    return { success: false, reason: 'no_attempts_left' };
-  }
-
-  const isCorrect = guessedUserId === pulse.sender_id;
-
-  await db.query(
-    `
-    INSERT INTO pulse_guess_attempts (pulse_id, guessed_user_id, was_correct)
-    VALUES ($1, $2, $3)
-  `,
-    [pulseId, guessedUserId, isCorrect]
-  );
-
-  // Ogni tentativo SBAGLIATO equivale a un vero Like inviato a quella
-  // persona — non è solo un tentativo "interno" al minigioco: chi
-  // viene indovinato per errore riceve comunque la notifica normale
-  // di un like misterioso, i suoi punti, e finisce nel sistema di
-  // reciprocità/shortlist come qualunque altro Like — altrimenti,
-  // in una serata affollata, chi ha provato a indovinare rischia di
-  // non riuscire mai a chiudere un match con chi gli piace davvero.
-  // (Il tentativo corretto invece porta già dritto alla chat, non
-  // serve passare anche dal Like: l'identità è già del tutto svelata.)
-  if (!isCorrect) {
-    await sendInteraction(
-      {
-        senderId: receiverId,
-        receiverId: guessedUserId,
-        arenaSessionId: pulse.arena_session_id,
-        type: 'like',
-      },
-      { db, io }
-    );
-  }
-
-  if (isCorrect) {
-    await db.query(`UPDATE pulses SET chat_unlocked = true WHERE id = $1`, [pulseId]);
-
-    // Match riuscito: creiamo davvero la conversazione, poi
-    // avvisiamo entrambe le parti in privato — è il momento "wow"
-    // del minigioco.
-    const chat = await openChatConversation(
-      {
-        userAId: pulse.sender_id,
-        userBId: receiverId,
-        arenaSessionId: pulse.arena_session_id,
-        unlockedVia: 'pulse_like_match',
-      },
-      { db, io }
-    );
-
-    io.to(`user_${pulse.sender_id}`).emit('chat_unlocked', {
-      pulseId,
-      withUserId: receiverId,
-      viaGuessGame: true,
-      conversationId: chat.conversationId,
-    });
-    io.to(`user_${receiverId}`).emit('chat_unlocked', {
-      pulseId,
-      withUserId: pulse.sender_id,
-      viaGuessGame: true,
-      conversationId: chat.conversationId,
-    });
-    notifyUser(
-      {
-        userId: pulse.sender_id,
-        event: 'match',
-        senderId: receiverId,
-        revealSender: true,
-        data: { conversationId: chat.conversationId },
-      },
-      { db }
-    );
-
-    // Bonus punti per un match riuscito — ora a ENTRAMBI (prima solo
-    // al ricevente), passando dal vero motore dei moltiplicatori
-    // (source dedicato pulse_like_match, +30% via
-    // MULTIPLIERS.guess_match_bonus) invece di un valore fisso a
-    // parte: si somma correttamente a eventuali altri bonus che
-    // ciascuno dei due potesse già avere (Premium, Founder, ecc.).
-    // awardPoints/awardSenderPoints emettono già da soli l'evento
-    // 'points_update' verso l'Arena — nessun broadcast manuale
-    // aggiuntivo necessario qui.
-    const matchResult = await awardPoints(
-      {
-        receiverId,
-        arenaSessionId: pulse.arena_session_id,
-        source: 'pulse_like_match',
-        senderId: pulse.sender_id,
-      },
-      { db, io }
-    );
-    await awardSenderPoints(
-      {
-        senderId: pulse.sender_id,
-        arenaSessionId: pulse.arena_session_id,
-        source: 'pulse_like_match',
-      },
-      { db, io }
-    );
-
-    return { success: true, matched: true, chatUnlocked: true, bonusPoints: matchResult.localPoints };
-  }
-  const remaining = pulse.guesses_remaining - 1;
-  await db.query(`UPDATE pulses SET guesses_remaining = $1 WHERE id = $2`, [remaining, pulseId]);
-
-  if (remaining <= 0) {
-    // Tentativi esauriti: la Pulse resta sua (era già accettata prima
-    // di iniziare il gioco), semplicemente il mittente resta un
-    // mistero per sempre. Nessun blocco: non è stato un rifiuto,
-    // solo un indovinello non riuscito.
-    return { success: true, matched: false, attemptsExhausted: true };
-  }
-
-  return { success: true, matched: false, attemptsRemaining: remaining };
 }
 
 function generateRedeemCode() {
@@ -1967,7 +1783,6 @@ module.exports = {
   trackProfileView,
   createPulseRecord,
   respondToPulse,
-  attemptGuess,
   applyPurchaseEffect,
   respondToSuperlike,
   getReceivedPulses,
