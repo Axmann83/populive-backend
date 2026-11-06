@@ -212,12 +212,15 @@ async function completeOnboarding({ userId, consentChoices }, { db }) {
 async function requireCompletedOnboarding(userId, { db }) {
   const user = await db.query(
     `
-    SELECT onboarding_completed FROM users WHERE id = $1
+    SELECT onboarding_completed, suspended_at FROM users WHERE id = $1
   `,
     [userId]
   );
 
   if (!user) return { allowed: false, reason: 'user_not_found' };
+  // Account sospeso da un Architetto dopo una segnalazione (B2): l'app
+  // riconosce il motivo e torna al login con un messaggio.
+  if (user.suspended_at) return { allowed: false, reason: 'account_suspended' };
   if (!user.onboarding_completed) return { allowed: false, reason: 'onboarding_incomplete' };
   return { allowed: true };
 }
@@ -236,13 +239,27 @@ async function getPublicProfile({ userId, arenaSessionId, viewerId }, { db }) {
   const profile = await db.query(
     `
     SELECT display_name, photo_url, photo_urls, avatar_emoji, bio, instant_influencer_category,
-           is_premium, premium_expires_at, is_verified
+           is_premium, premium_expires_at, is_verified, suspended_at
     FROM users WHERE id = $1
   `,
     [userId]
   );
 
   if (!profile) return { success: false, reason: 'user_not_found' };
+  // Account sospeso, o blocco manuale tra chi guarda e chi è guardato
+  // (B2): il profilo non si mostra, con lo stesso motivo nei due casi
+  // (chi è stato bloccato non deve capirlo da qui).
+  if (profile.suspended_at) return { success: false, reason: 'profile_unavailable' };
+  if (viewerId && viewerId !== userId) {
+    const blocked = await db.query(
+      `
+      SELECT 1 FROM user_blocks
+      WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1)
+    `,
+      [viewerId, userId]
+    );
+    if (blocked) return { success: false, reason: 'profile_unavailable' };
+  }
 
   // Verifica in corso — se c'è una richiesta ancora "pending", il
   // frontend deve poterlo sapere per mostrare "in revisione" invece

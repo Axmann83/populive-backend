@@ -869,6 +869,7 @@ module.exports = {
   leaveVenue,
   getCurrentCheckin,
   expireOldCheckins,
+  announceCheckout,
   isUuid,
 };
 

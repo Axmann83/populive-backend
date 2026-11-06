@@ -207,7 +207,11 @@ async function verifyOtp({ phoneNumber, code }, { db }) {
   // creiamo uno nuovo "vuoto" — il resto del profilo (nome, foto,
   // hashtag, consenso) si completa nel flusso di onboarding già
   // scritto, che parte subito dopo il login per chi è nuovo.
-  let user = await db.query(`SELECT id, onboarding_completed FROM users WHERE phone_number = $1`, [normalizedPhone]);
+  let user = await db.query(`SELECT id, onboarding_completed, suspended_at FROM users WHERE phone_number = $1`, [
+    normalizedPhone,
+  ]);
+  // Account sospeso da un Architetto dopo una segnalazione (B2).
+  if (user?.suspended_at) return { success: false, reason: 'account_suspended' };
 
   let isNewUser = false;
   if (!user) {

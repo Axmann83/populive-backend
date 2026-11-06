@@ -267,6 +267,7 @@ async function getVenueHistoricalCheckins({ venueId, requesterId }, { db }) {
     WHERE a.venue_id = $1
       AND c.checked_in_at >= now() - INTERVAL '${HISTORICAL_BOARD_DAYS} days'
       AND u.appears_in_historical_search = true
+      AND u.suspended_at IS NULL
       AND u.id != $2
       AND NOT EXISTS (
         SELECT 1 FROM blocks

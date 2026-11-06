@@ -74,7 +74,7 @@ async function getLocalRanking({ arenaSessionId, hashtag, gender }, { db }) {
     -- assorba automaticamente quel possibile sdoppiamento.
     JOIN (SELECT DISTINCT user_id FROM checkins WHERE arena_session_id = $1) c
       ON c.user_id = u.id
-    WHERE true ${extraWhere} AND u.deleted_at IS NULL
+    WHERE true ${extraWhere} AND u.deleted_at IS NULL AND u.suspended_at IS NULL
     ORDER BY local_points DESC
   `,
     params
@@ -107,7 +107,7 @@ async function getGlobalRanking({ limit = 100, hashtag, gender }, { db }) {
   // più in alto tra chi ha #nightlife" o "solo donne". Nessuno dei
   // due è obbligatorio: passati entrambi vuoti, la query si
   // comporta esattamente come prima.
-  const conditions = ['u.onboarding_completed = true', 'u.deleted_at IS NULL']; // SEMPRE — mai mostrare righe "fantasma" (es. account pre-creati per Architetti/Founder/test, mai passati dalla registrazione vera) né account cancellati (12/9)
+  const conditions = ['u.onboarding_completed = true', 'u.deleted_at IS NULL', 'u.suspended_at IS NULL']; // SEMPRE — mai mostrare righe "fantasma" (es. account pre-creati per Architetti/Founder/test, mai passati dalla registrazione vera) né account cancellati (12/9)
   const params = [];
   let paramIndex = 1;
 

@@ -140,6 +140,10 @@ function buildContent(event, { senderName, drinkName, conversationId }) {
       return { title: 'È un match! 🎉', body: `Tu e ${name} ora potete scrivervi` };
     case 'message':
       return { title: 'Nuovo messaggio', body: `${name} ti ha scritto`, group: `chat_${conversationId}` };
+    // Agli Architetti, per ogni nuova segnalazione (B2): da controllare
+    // nella dashboard (Apple chiede di agire entro 24 ore).
+    case 'report':
+      return { title: 'Nuova segnalazione', body: 'Da controllare nella dashboard', group: 'reports' };
     default:
       return null;
   }
@@ -155,7 +159,7 @@ function buildContent(event, { senderName, drinkName, conversationId }) {
  * Si chiama SENZA await, accanto all'evento socket: non lancia mai
  * errori e non deve rallentare né far fallire un Like o un messaggio.
  *
- * @param event 'like' | 'superlike' | 'pulse' | 'match' | 'message'
+ * @param event 'like' | 'superlike' | 'pulse' | 'match' | 'message' | 'report'
  * @param senderId chi ha causato l'evento; il nome si mostra solo se
  *   revealSender è vero (mai per il Like, né per la Pulse anonima)
  * @param data id utili all'app per aprire la schermata giusta al tocco

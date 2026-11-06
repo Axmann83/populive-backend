@@ -68,6 +68,11 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type, via
   const senderTestRow = await db.query(`SELECT is_test_account FROM users WHERE id = $1`, [senderId]);
   const isTestSender = !!senderTestRow?.is_test_account;
 
+  // Il blocco manuale (B2) vale anche per gli account di prova.
+  if (await hasUserBlockBetween({ userAId: senderId, userBId: receiverId }, { db })) {
+    return { success: false, reason: 'blocked_by_receiver' };
+  }
+
   if (!isTestSender) {
     const blocked = await db.query(
       `
@@ -372,6 +377,14 @@ async function respondToSuperlike({ interactionId, receiverId, action }, { db, i
   if (!interaction || interaction.receiver_id !== receiverId || interaction.type !== 'superlike') {
     return { success: false, reason: 'not_found_or_not_yours' };
   }
+  // Dopo un blocco (B2) non si accetta più niente tra i due: l'app
+  // chiude la finestra come per un'interazione non più valida.
+  if (
+    action === 'accept' &&
+    (await hasUserBlockBetween({ userAId: interaction.sender_id, userBId: receiverId }, { db }))
+  ) {
+    return { success: false, reason: 'not_found_or_not_yours' };
+  }
   // "In sospeso" (ignored) vuol dire "decido dopo" (decisione D9, 2/10):
   // si può ancora accettare o rifiutare finché la serata è aperta e non
   // si cambia locale (lì il Superlike passa a 'expired'). Prima solo
@@ -612,6 +625,9 @@ async function applyPurchaseEffect({ userId, productId, arenaSessionId, external
 // ------------------------------------------------------------
 async function trackProfileView({ viewerId, viewedUserId, arenaSessionId, viaHistoricalBoard }, { db, io }) {
   if (viewerId === viewedUserId) return { success: true, skipped: true }; // non contano le proprie
+  if (await hasUserBlockBetween({ userAId: viewerId, userBId: viewedUserId }, { db })) {
+    return { success: false, reason: 'blocked_by_viewed_user' };
+  }
 
   const blocked = await db.query(
     `
@@ -832,6 +848,10 @@ async function getSenderProfile(senderId, { db }) {
 async function respondToPulse({ pulseId, receiverId, action }, { db, io }) {
   const pulse = await db.query(`SELECT * FROM pulses WHERE id = $1`, [pulseId]);
   if (!pulse || pulse.receiver_id !== receiverId) {
+    return { success: false, reason: 'not_found_or_not_yours' };
+  }
+  // Dopo un blocco (B2), v. respondToSuperlike.
+  if (action === 'accept' && (await hasUserBlockBetween({ userAId: pulse.sender_id, userBId: receiverId }, { db }))) {
     return { success: false, reason: 'not_found_or_not_yours' };
   }
   // "In sospeso" = "decido dopo" (D9, 2/10), v. respondToSuperlike.
@@ -1478,41 +1498,24 @@ async function getPermanentlyBlockedPairUserIds({ userId }, { db }) {
 
 /**
  * ============================================================
- * BLOCCA DALLA CHAT — richiesta esplicita dell'utente (22/8)
+ * BLOCCO MANUALE (B2, novembre 2026)
  * ============================================================
- * Consolidamento di due idee future citate insieme: un vero
- * bottone "Blocca" dentro la chat, che copre anche la
- * "cancellazione della chat" (bloccare qualcuno chiude per forza
- * anche la conversazione in corso — non avrebbe senso restasse
- * aperta con chi si è appena bloccato).
- * Blocco SEMPRE bidirezionale (a differenza del rifiuto, che è a
- * senso unico) — un blocco manuale è una scelta forte e deliberata,
- * nessuna delle due parti deve più poter contattare l'altra.
+ * C'è un blocco deciso da una delle due persone (profilo o chat,
+ * v. populive-moderation-logic.js)? Controllo a parte da quello
+ * sulla tabella blocks perché vale anche per gli account di prova,
+ * che quello salta: i revisori di Apple provano il blocco con un
+ * account di prova, e deve funzionare per davvero.
  * ============================================================
  */
-async function blockUserFromChat({ conversationId, blockerId }, { db, io }) {
-  const conv = await db.query(`SELECT * FROM chat_conversations WHERE id = $1`, [conversationId]);
-  if (!conv) return { success: false, reason: 'conversation_not_found' };
-  if (conv.user_a_id !== blockerId && conv.user_b_id !== blockerId) {
-    return { success: false, reason: 'not_a_participant' };
-  }
-
-  const otherUserId = conv.user_a_id === blockerId ? conv.user_b_id : conv.user_a_id;
-
-  await blockBothDirectionsPermanently({ userAId: blockerId, userBId: otherUserId, reason: 'user_blocked' }, { db });
-
-  if (!conv.closed_at) {
-    await db.query(`UPDATE chat_conversations SET closed_at = now() WHERE id = $1`, [conversationId]);
-  }
-
-  // Notifica alla persona bloccata che la chat si è chiusa — MAI
-  // dire esplicitamente "sei stato bloccato" (potrebbe provocare
-  // una reazione ostile), stesso principio già usato per rifiuto/
-  // sospeso: un "no" silenzioso, mai annunciato con enfasi.
-  io.to(`user_${otherUserId}`).emit('chat_closed', { conversationId, reason: 'blocked' });
-  io.to(`user_${blockerId}`).emit('chat_closed', { conversationId, reason: 'blocked' });
-
-  return { success: true };
+async function hasUserBlockBetween({ userAId, userBId }, { db }) {
+  const row = await db.query(
+    `
+    SELECT 1 FROM user_blocks
+    WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1)
+  `,
+    [userAId, userBId]
+  );
+  return !!row;
 }
 
 /**
@@ -1798,7 +1801,8 @@ module.exports = {
   refundPulseCredit,
   refundAbandonedPulsesForSession,
   getPermanentlyBlockedPairUserIds,
-  blockUserFromChat,
+  hasUserBlockBetween,
+  blockBothDirectionsPermanently,
   getPendingReceivedInteractions,
   getSentInteractionsHistory,
   getUnseenLikeCenterCount,

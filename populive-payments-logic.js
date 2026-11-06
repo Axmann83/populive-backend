@@ -25,7 +25,7 @@
  */
 
 const Stripe = require('stripe');
-const { canSendDirectContact, createPulseRecord } = require('./populive-interactions-logic');
+const { canSendDirectContact, createPulseRecord, hasUserBlockBetween } = require('./populive-interactions-logic');
 const { applyPurchaseEffect } = require('./populive-interactions-logic');
 
 function getStripeClient() {
@@ -175,6 +175,11 @@ async function initiatePulsePurchase({ senderId, receiverId, arenaSessionId, dri
   // davvero per farlo.
   if (senderId === receiverId) {
     return { success: false, reason: 'cannot_interact_with_self' };
+  }
+
+  // Il blocco manuale (B2) vale anche per gli account di prova.
+  if (await hasUserBlockBetween({ userAId: senderId, userBId: receiverId }, { db })) {
+    return { success: false, reason: 'blocked_by_receiver' };
   }
 
   const blocked = await db.query(

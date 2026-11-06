@@ -42,12 +42,22 @@ const {
   dismissPulseView,
   clearAllPulseViews,
   getPermanentlyBlockedPairUserIds,
-  blockUserFromChat,
   getPendingReceivedInteractions,
   getSentInteractionsHistory,
   getUnseenLikeCenterCount,
   markLikeCenterSeen,
 } = require('./populive-interactions-logic');
+const {
+  blockUser,
+  blockUserInConversation,
+  unblockUser,
+  getBlockedUsers,
+  getUserBlockPairIds,
+  createReport,
+  listReports,
+  resolveReport,
+  unsuspendUser,
+} = require('./populive-moderation-logic');
 const {
   initiatePulsePurchase,
   initiatePurchase,
@@ -201,6 +211,10 @@ async function requireAuthOnly(req, res, next) {
 
   const { valid, userId } = verifyToken(token);
   if (!valid) return res.status(401).json({ success: false, reason: 'invalid_or_expired_token' });
+
+  // Account sospeso (B2): fuori anche prima di finire l'onboarding.
+  const suspended = await db.query(`SELECT 1 FROM users WHERE id = $1 AND suspended_at IS NOT NULL`, [userId]);
+  if (suspended) return res.status(403).json({ success: false, reason: 'account_suspended' });
 
   req.userId = userId;
   next();
@@ -573,7 +587,10 @@ app.get(
     // Solo il proprietario può vedere la propria lista — usiamo
     // sempre req.userId (dal token verificato), mai l'URL scritto a mano.
     const blockedUserIds = await getPermanentlyBlockedPairUserIds({ userId: req.userId }, deps);
-    res.json({ success: true, blockedUserIds });
+    // Solo i blocchi manuali (B2): le classifiche li tolgono, i
+    // rifiuti no (lì restano come prima).
+    const userBlockedIds = await getUserBlockPairIds({ userId: req.userId }, deps);
+    res.json({ success: true, blockedUserIds, userBlockedIds });
   })
 );
 
@@ -1421,8 +1438,84 @@ app.post(
   '/api/chat/:conversationId/block',
   requireOnboarded,
   ah(async (req, res) => {
-    const result = await blockUserFromChat({ conversationId: req.params.conversationId, blockerId: req.userId }, deps);
+    const result = await blockUserInConversation(
+      { conversationId: req.params.conversationId, blockerId: req.userId },
+      deps
+    );
     res.json(result);
+  })
+);
+
+// ------------------------------------------------------------
+// SEGNALAZIONI E BLOCCO (B2, novembre 2026) — v.
+// populive-moderation-logic.js
+// ------------------------------------------------------------
+app.post(
+  '/api/reports',
+  requireOnboarded,
+  ah(async (req, res) => {
+    const { reportedUserId, context, conversationId, reason, details } = req.body || {};
+    const result = await createReport(
+      { reporterId: req.userId, reportedUserId, context, conversationId, reason, details },
+      deps
+    );
+    res.json(result);
+  })
+);
+
+app.get(
+  '/api/blocks',
+  requireOnboarded,
+  ah(async (req, res) => {
+    const blockedUsers = await getBlockedUsers({ userId: req.userId }, deps);
+    res.json({ success: true, blockedUsers });
+  })
+);
+
+app.post(
+  '/api/users/:userId/block',
+  requireOnboarded,
+  ah(async (req, res) => {
+    const result = await blockUser({ blockerId: req.userId, blockedId: req.params.userId }, deps);
+    res.json(result);
+  })
+);
+
+app.delete(
+  '/api/users/:userId/block',
+  requireOnboarded,
+  ah(async (req, res) => {
+    const result = await unblockUser({ blockerId: req.userId, blockedId: req.params.userId }, deps);
+    res.json(result);
+  })
+);
+
+app.get(
+  '/api/dashboard/reports',
+  requireArchitect,
+  ah(async (req, res) => {
+    const status = req.query.status === 'closed' ? 'closed' : 'open';
+    res.json(await listReports({ status }, deps));
+  })
+);
+
+app.post(
+  '/api/dashboard/reports/:reportId/resolve',
+  requireArchitect,
+  ah(async (req, res) => {
+    const result = await resolveReport(
+      { reportId: req.params.reportId, architectId: req.userId, action: req.body?.action },
+      deps
+    );
+    res.json(result);
+  })
+);
+
+app.post(
+  '/api/dashboard/users/:userId/unsuspend',
+  requireArchitect,
+  ah(async (req, res) => {
+    res.json(await unsuspendUser({ userId: req.params.userId }, deps));
   })
 );
 
