@@ -2,8 +2,8 @@
  * ============================================================
  * POPULIVE — CHAT 1-A-1
  * ============================================================
- * Si apre solo dopo uno sblocco (mai spontaneamente), si chiude
- * all'uso a fine sessione. Ogni messaggio è privato — notificato
+ * Si apre solo dopo uno sblocco (mai spontaneamente) e resta anche
+ * dopo la serata (M4); si chiude solo con un blocco. Ogni messaggio è privato — notificato
  * SOLO al destinatario via WebSocket, mai trasmesso alla stanza
  * condivisa dell'Arena.
  * ============================================================
@@ -147,177 +147,55 @@ async function getMessages({ conversationId, requesterId }, { db }) {
     return { success: false, reason: 'not_a_participant' };
   }
 
+  // Chat eliminata da chi la legge (M4): solo i messaggi arrivati dopo.
   const messages = await db.queryAll(
     `
-    SELECT id, sender_id, body, created_at FROM chat_messages
-    WHERE conversation_id = $1
-    ORDER BY created_at ASC
+    SELECT m.id, m.sender_id, m.body, m.created_at FROM chat_messages m
+    LEFT JOIN conversation_deletions d ON d.conversation_id = m.conversation_id AND d.user_id = $2
+    WHERE m.conversation_id = $1 AND (d.deleted_at IS NULL OR m.created_at > d.deleted_at)
+    ORDER BY m.created_at ASC
   `,
-    [conversationId]
+    [conversationId, requesterId]
   );
-
-  const myWantsKeep = conv.user_a_id === requesterId ? conv.user_a_wants_keep : conv.user_b_wants_keep;
-  const theirWantsKeep = conv.user_a_id === requesterId ? conv.user_b_wants_keep : conv.user_a_wants_keep;
 
   return {
     success: true,
     messages,
     isClosed: !!conv.closed_at,
-    myWantsKeep,
-    theirWantsKeep,
   };
 }
 
 /**
- * Imposta la preferenza "conserva questa chat oltre la serata" per
- * UNA delle due parti. Bilaterale e sempre revocabile:
- *   - resta viva oltre la sessione solo se ENTRAMBI hanno scelto "conserva"
- *   - se una chat già conservata (closed_at ancora null dopo la fine
- *     della sessione originale) perde il consenso di una delle due
- *     parti, si chiude SUBITO per entrambi, non alla prossima serata
+ * ============================================================
+ * ELIMINARE UNA CHAT SOLO PER SÉ (M4, novembre 2026)
+ * ============================================================
+ * Le chat si conservano sempre: a fine serata non si chiudono più
+ * (prima si chiudevano senza il "Conserva" di entrambi, con
+ * l'interruttore chat_keep_required acceso; tolti tutti e due il
+ * 09/11, deciso il 01/11). Chi non vuole più vederne una la elimina:
+ * sparisce SOLO dal suo elenco, l'altra persona continua a vederla
+ * e può scrivere. Come su WhatsApp: se l'altra scrive dopo, la chat
+ * torna nell'elenco di chi l'ha eliminata, con i soli messaggi
+ * successivi (getMessages, getMyActiveConversations). Eliminarla di
+ * nuovo sposta deleted_at in avanti. I messaggi restano nel database
+ * per l'altra persona e per le segnalazioni (B2).
+ * ============================================================
  */
-async function setChatKeepPreference({ conversationId, userId, wantsKeep }, { db, io }) {
-  const conv = await db.query(`SELECT * FROM chat_conversations WHERE id = $1`, [conversationId]);
+async function deleteConversationForUser({ conversationId, userId }, { db }) {
+  const conv = await db.query(`SELECT user_a_id, user_b_id FROM chat_conversations WHERE id = $1`, [conversationId]);
   if (!conv) return { success: false, reason: 'conversation_not_found' };
   if (conv.user_a_id !== userId && conv.user_b_id !== userId) {
     return { success: false, reason: 'not_a_participant' };
   }
-
-  const column = conv.user_a_id === userId ? 'user_a_wants_keep' : 'user_b_wants_keep';
-  await db.query(`UPDATE chat_conversations SET ${column} = $1 WHERE id = $2`, [wantsKeep, conversationId]);
-
-  const otherUserId = conv.user_a_id === userId ? conv.user_b_id : conv.user_a_id;
-
-  // Enforcement in tempo reale: se questa chat era già stata
-  // "conservata" (sessione originale finita, closed_at ancora null
-  // grazie al doppio consenso) e adesso una delle due parti ripensa
-  // la scelta, chiudiamo SUBITO, senza aspettare nulla. Vale solo se
-  // l'interruttore "richiedi Conserva esplicito" è acceso — a
-  // interruttore spento questo bottone non è nemmeno mostrato in
-  // ChatWindow.jsx, ma controlliamo anche qui per sicurezza (26/8).
-  const keepRequiredFlag = await db.query(
-    `SELECT is_enabled FROM feature_flags WHERE feature_key = 'chat_keep_required'`
-  );
-  const keepRequired = keepRequiredFlag ? keepRequiredFlag.is_enabled : true;
-  const sessionAlreadyEnded = keepRequired && (await isSessionEnded(conv.arena_session_id, { db }));
-  if (!wantsKeep && sessionAlreadyEnded && conv.closed_at === null) {
-    // Stesso declassamento del blocco "da match" già applicato in
-    // closeConversationsForSession, per lo stesso identico motivo —
-    // qui capita quando qualcuno ritira il consenso DOPO che la
-    // serata originale è già finita, un punto di chiusura diverso
-    // ma concettualmente lo stesso evento.
-    await db.query(
-      `
-      UPDATE blocks SET arena_session_id = $3
-      WHERE reason = 'match' AND arena_session_id IS NULL
-        AND ((blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1))
-    `,
-      [conv.user_a_id, conv.user_b_id, conv.arena_session_id]
-    );
-
-    await db.query(`UPDATE chat_conversations SET closed_at = now() WHERE id = $1`, [conversationId]);
-    io.to(`user_${userId}`).emit('chat_closed', { conversationId, reason: 'preference_withdrawn' });
-    io.to(`user_${otherUserId}`).emit('chat_closed', { conversationId, reason: 'preference_withdrawn' });
-    return { success: true, chatNowClosed: true };
-  }
-
-  return { success: true, chatNowClosed: false };
-}
-
-// Controlla se la sessione a cui appartiene questa chat è già finita
-// (utile per capire se siamo nella fase "oltre la serata originale").
-// Finita = closed_at valorizzato: dall'ottobre 2026 (D14) una serata
-// chiusa agli ingressi dopo l'orario è ancora in corso, finché non
-// inizia la successiva.
-async function isSessionEnded(arenaSessionId, { db }) {
-  const session = await db.query(
-    `
-    SELECT closed_at FROM arena_sessions WHERE id = $1
-  `,
-    [arenaSessionId]
-  );
-  return session ? session.closed_at !== null : true;
-}
-
-/**
- * Chiamata dal "motore a orari" alla chiusura di ogni Arena — chiude
- * ALL'USO le conversazioni di quella sessione, MA rispetta il doppio
- * consenso: se entrambe le parti hanno scelto "conserva", la chat
- * resta aperta anche oltre la fine della serata (i messaggi restano
- * comunque nel database per l'archivio di sicurezza in ogni caso).
- */
-/**
- * ============================================================
- * DECLASSAMENTO BLOCCO "DA MATCH" — chat non salvata (25/8)
- * ============================================================
- * Problema reale discusso con l'utente: il blocco anti-abuso da
- * match (v. blockBothDirectionsPermanently in populive-interactions-
- * logic.js) nasce SEMPRE permanente al momento del match, a
- * prescindere da cosa succede poi alla chat — ma "non salvare la
- * chat" è spesso una scelta PASSIVA (distrazione, batteria scarica,
- * fine serata frettolosa), non un rifiuto vero. Trattarla come
- * permanente quanto un vero rifiuto/blocco non ha senso.
- *
- * Soluzione: quando una chat sta per chiudersi perché NON salvata
- * da entrambi, se il blocco tra quelle due persone è ANCORA "solo
- * da match" (mai rinforzato da un rifiuto o da un blocco manuale
- * vero — la gerarchia rejection > user_blocked > match resta
- * intatta) lo si declassa da permanente a valido SOLO per quella
- * sessione — proprio come un Pulse/Superlike lasciato "in
- * sospeso". Il declassamento riusa lo stesso meccanismo di
- * controllo già esistente ovunque nell'app (arena_session_id
- * NULL = permanente, valorizzato = vale solo per QUELLA sessione)
- * — non serve nessuna logica nuova di lettura, solo questo unico
- * punto di scrittura in più.
- * ============================================================
- */
-async function closeConversationsForSession(arenaSessionId, { db }) {
-  // Semplificazione per le prime serate test (26/8, richiesta
-  // esplicita): se l'interruttore "richiedi Conserva esplicito" è
-  // spento in dashboard, le chat NON si chiudono mai da sole a fine
-  // serata — si comportano come su Tinder/Hinge, si conservano di
-  // default. L'unico modo per finirla resta il "Blocca" vero (mai
-  // toccato da questo interruttore). Tutto il resto costruito il
-  // 25/8 (declassamento del blocco da match, promemoria "Ci siamo
-  // già incontrati") resta pronto e corretto per quando l'interruttore
-  // verrà riacceso — semplicemente non si attiva mai finché non c'è
-  // nessuna chat da chiudere.
-  const keepRequiredFlag = await db.query(
-    `SELECT is_enabled FROM feature_flags WHERE feature_key = 'chat_keep_required'`
-  );
-  const keepRequired = keepRequiredFlag ? keepRequiredFlag.is_enabled : true;
-  if (!keepRequired) return;
-
-  const toClose = await db.queryAll(
-    `
-    SELECT user_a_id, user_b_id FROM chat_conversations
-    WHERE arena_session_id = $1
-      AND closed_at IS NULL
-      AND NOT (user_a_wants_keep AND user_b_wants_keep)
-  `,
-    [arenaSessionId]
-  );
-
-  for (const pair of toClose) {
-    await db.query(
-      `
-      UPDATE blocks SET arena_session_id = $3
-      WHERE reason = 'match' AND arena_session_id IS NULL
-        AND ((blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1))
-    `,
-      [pair.user_a_id, pair.user_b_id, arenaSessionId]
-    );
-  }
-
   await db.query(
     `
-    UPDATE chat_conversations SET closed_at = now()
-    WHERE arena_session_id = $1
-      AND closed_at IS NULL
-      AND NOT (user_a_wants_keep AND user_b_wants_keep)
+    INSERT INTO conversation_deletions (conversation_id, user_id, deleted_at)
+    VALUES ($1, $2, now())
+    ON CONFLICT (conversation_id, user_id) DO UPDATE SET deleted_at = now()
   `,
-    [arenaSessionId]
+    [conversationId, userId]
   );
+  return { success: true };
 }
 
 /**
@@ -347,7 +225,7 @@ async function purgeExpiredChatMessages({ db }) {
  * questo momento — letta sempre fresca dal database vero, mai dalla
  * sola memoria del telefono. Risolve un problema reale: prima non
  * esisteva NESSUN modo di ritrovare una chat dopo un aggiornamento
- * della pagina, anche se "Conserva" era stato scelto da entrambi —
+ * della pagina —
  * lo stato di "quale chat ho aperto" viveva solo nella sessione del
  * browser, sparendo ad ogni refresh.
  *
@@ -366,19 +244,25 @@ async function getMyActiveConversations({ userId }, { db }) {
         SELECT COUNT(*) FROM chat_messages m
         WHERE m.conversation_id = c.id
           AND m.sender_id != $1
-          AND m.created_at > COALESCE(
-            CASE WHEN c.user_a_id = $1 THEN c.user_a_last_read_at ELSE c.user_b_last_read_at END,
-            '1970-01-01'::timestamptz
+          AND m.created_at > GREATEST(
+            COALESCE(
+              CASE WHEN c.user_a_id = $1 THEN c.user_a_last_read_at ELSE c.user_b_last_read_at END,
+              '1970-01-01'::timestamptz
+            ),
+            COALESCE(d.deleted_at, '1970-01-01'::timestamptz)
           )
       ) AS unread_count
     FROM chat_conversations c
+    LEFT JOIN conversation_deletions d ON d.conversation_id = c.id AND d.user_id = $1
     LEFT JOIN LATERAL (
       SELECT body, sender_id, created_at FROM chat_messages
-      WHERE conversation_id = c.id
+      WHERE conversation_id = c.id AND (d.deleted_at IS NULL OR created_at > d.deleted_at)
       ORDER BY created_at DESC
       LIMIT 1
     ) last_msg ON true
     WHERE (c.user_a_id = $1 OR c.user_b_id = $1) AND c.closed_at IS NULL
+      -- eliminata da questa persona (M4): torna solo con un messaggio nuovo
+      AND (d.deleted_at IS NULL OR last_msg.created_at IS NOT NULL)
     ORDER BY COALESCE(last_msg.created_at, c.created_at) DESC
   `,
     [userId]
@@ -421,14 +305,18 @@ async function getUnreadChatCount({ userId }, { db }) {
   const row = await db.query(
     `
     SELECT COUNT(*) AS total FROM chat_conversations c
+    LEFT JOIN conversation_deletions d ON d.conversation_id = c.id AND d.user_id = $1
     WHERE (c.user_a_id = $1 OR c.user_b_id = $1) AND c.closed_at IS NULL
       AND EXISTS (
         SELECT 1 FROM chat_messages m
         WHERE m.conversation_id = c.id
           AND m.sender_id != $1
-          AND m.created_at > COALESCE(
-            CASE WHEN c.user_a_id = $1 THEN c.user_a_last_read_at ELSE c.user_b_last_read_at END,
-            '1970-01-01'::timestamptz
+          AND m.created_at > GREATEST(
+            COALESCE(
+              CASE WHEN c.user_a_id = $1 THEN c.user_a_last_read_at ELSE c.user_b_last_read_at END,
+              '1970-01-01'::timestamptz
+            ),
+            COALESCE(d.deleted_at, '1970-01-01'::timestamptz)
           )
       )
   `,
@@ -442,8 +330,7 @@ module.exports = {
   openAdminChat,
   sendMessage,
   getMessages,
-  closeConversationsForSession,
-  setChatKeepPreference,
+  deleteConversationForUser,
   purgeExpiredChatMessages,
   getMyActiveConversations,
   markConversationRead,

@@ -68,7 +68,7 @@ const { getPulseNightInfo } = require('./populive-pulse-nights');
 const {
   sendMessage,
   getMessages,
-  setChatKeepPreference,
+  deleteConversationForUser,
   getMyActiveConversations,
   markConversationRead,
   getUnreadChatCount,
@@ -1433,6 +1433,19 @@ app.get(
   })
 );
 
+// Elimina la chat solo per chi lo chiede (M4): v. deleteConversationForUser.
+app.delete(
+  '/api/chat/:conversationId',
+  requireOnboarded,
+  ah(async (req, res) => {
+    const result = await deleteConversationForUser(
+      { conversationId: req.params.conversationId, userId: req.userId },
+      deps
+    );
+    res.json(result);
+  })
+);
+
 app.post(
   '/api/chat/:conversationId/block',
   requireOnboarded,
@@ -1515,23 +1528,6 @@ app.post(
   requireArchitect,
   ah(async (req, res) => {
     res.json(await unsuspendUser({ userId: req.params.userId }, deps));
-  })
-);
-
-app.post(
-  '/api/chat/:conversationId/keep-preference',
-  requireOnboarded,
-  ah(async (req, res) => {
-    const { wantsKeep } = req.body;
-    const result = await setChatKeepPreference(
-      {
-        conversationId: req.params.conversationId,
-        userId: req.userId,
-        wantsKeep,
-      },
-      deps
-    );
-    res.json(result);
   })
 );
 

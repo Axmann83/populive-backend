@@ -695,12 +695,22 @@ async function evaluateLocationPing({ userId, arenaSessionId, latitude, longitud
  * su misura.
  * ============================================================
  */
+// Il radar della serata si attiva da 2 persone, per tutti i locali, e
+// non si modifica (M3, deciso il 01/11; prima 10–20 a seconda del
+// tipo). La migrazione 010 ha portato a 2 anche i locali esistenti.
+const RADAR_ACTIVATION_THRESHOLD = 2;
+
+// Minimo di persone per la classifica locale di un locale nuovo:
+// l'Architetto lo cambia dalla dashboard (M3: 20, prima 5). Stesso
+// valore del DEFAULT della colonna (migrazione 010).
+const DEFAULT_MIN_USERS_FOR_LOCAL_RANKING = 20;
+
 const VIRTUAL_VENUE_DEFAULTS = {
-  nightclub: { openTime: '22:00:00', closeTime: '06:00:00', checkinThreshold: 20 },
-  ristorante: { openTime: '19:00:00', closeTime: '24:00:00', checkinThreshold: 15 },
-  palestra: { openTime: '06:00:00', closeTime: '24:00:00', checkinThreshold: 10 },
-  cocktail_bar: { openTime: '17:00:00', closeTime: '22:00:00', checkinThreshold: 15 },
-  retail: { openTime: '09:00:00', closeTime: '20:00:00', checkinThreshold: 10 },
+  nightclub: { openTime: '22:00:00', closeTime: '06:00:00' },
+  ristorante: { openTime: '19:00:00', closeTime: '24:00:00' },
+  palestra: { openTime: '06:00:00', closeTime: '24:00:00' },
+  cocktail_bar: { openTime: '17:00:00', closeTime: '22:00:00' },
+  retail: { openTime: '09:00:00', closeTime: '20:00:00' },
 };
 
 async function createVirtualVenue({ name, area, latitude, longitude, venueType, minUsersForLocalRanking }, { db }) {
@@ -713,10 +723,12 @@ async function createVirtualVenue({ name, area, latitude, longitude, venueType, 
 
   // Soglia minima per la classifica locale — facoltativa: se chi
   // crea il locale non ufficiale non la specifica, usiamo lo stesso
-  // valore di default della colonna (5), risolto qui in JavaScript
+  // valore di default della colonna (20), risolto qui in JavaScript
   // perché DEFAULT non è utilizzabile dentro un COALESCE in SQL.
   const minUsers =
-    Number.isInteger(minUsersForLocalRanking) && minUsersForLocalRanking >= 1 ? minUsersForLocalRanking : 5;
+    Number.isInteger(minUsersForLocalRanking) && minUsersForLocalRanking >= 1
+      ? minUsersForLocalRanking
+      : DEFAULT_MIN_USERS_FOR_LOCAL_RANKING;
 
   const venue = await db.query(
     `
@@ -729,7 +741,7 @@ async function createVirtualVenue({ name, area, latitude, longitude, venueType, 
       area || null,
       latitude,
       longitude,
-      defaults.checkinThreshold,
+      RADAR_ACTIVATION_THRESHOLD,
       venueType,
       defaults.openTime,
       defaults.closeTime,

@@ -453,7 +453,7 @@ async function checkLocalRankingThreshold({ arenaSessionId }, { db }) {
   `,
     [arenaSessionId]
   );
-  const minRequired = venueRow?.min_users_for_local_ranking ?? 5;
+  const minRequired = venueRow?.min_users_for_local_ranking ?? 20;
 
   const checkinCountRow = await db.query(
     `

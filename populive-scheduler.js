@@ -15,7 +15,7 @@
  * ============================================================
  */
 
-const { closeConversationsForSession, purgeExpiredChatMessages } = require('./populive-chat-logic');
+const { purgeExpiredChatMessages } = require('./populive-chat-logic');
 const {
   evaluatePendingDiscoveryMarkers,
   awardTopTalentBonuses,
@@ -320,9 +320,8 @@ async function closeSession(sessionId, { db, redis, io }) {
     [sessionId]
   );
 
-  // Chat: rispetta il doppio consenso "conserva" già costruito —
-  // chiude solo quelle senza consenso reciproco.
-  await closeConversationsForSession(sessionId, { db });
+  // Chat: restano aperte anche dopo la serata (M4, 09/11), niente da
+  // fare qui. Si chiudono solo con un blocco.
 
   // Le Pulse scadono di norma all'orario di chiusura (scheduler, qui
   // sopra); se la serata finisce prima (es. orari cambiati) scadono

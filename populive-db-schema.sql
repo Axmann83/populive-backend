@@ -191,7 +191,7 @@ CREATE TABLE venues (
     area                VARCHAR(100),                -- es. "Roma · Trastevere"
     latitude            DOUBLE PRECISION,
     longitude           DOUBLE PRECISION,
-    checkin_threshold   INT DEFAULT 20,               -- soglia di attivazione classifica locale
+    checkin_threshold   INT DEFAULT 2,                -- persone che attivano il radar della serata (2 per tutti, migrazione 010)
     spending_threshold_cents INT,                      -- soglia di spesa al tavolo che sblocca il bonus punti (personalizzabile per locale)
     spending_bonus_points    INT,                       -- punti fissi assegnati al superamento della soglia (mai proporzionali all'importo)
     is_partner          BOOLEAN DEFAULT FALSE,        -- ha un accordo firmato (Pulse riscattabile davvero)
