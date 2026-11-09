@@ -134,7 +134,7 @@ function buildContent(event, { senderName, drinkName, conversationId, extra = {}
     case 'pulse':
       return {
         title: 'Pulse 🍹',
-        body: drinkName ? `${name} ti ha mandato una Pulse: ${drinkName}` : `${name} ti offre un drink con una Pulse`,
+        body: drinkName ? `${name} ti ha mandato un Pulse: ${drinkName}` : `${name} ti offre un drink con un Pulse`,
       };
     // Un'ora prima della chiusura (M11): Pulse comprate e non usate, o
     // drink ricevuti e non ritirati, scadono alla fine della serata.
@@ -148,7 +148,7 @@ function buildContent(event, { senderName, drinkName, conversationId, extra = {}
     case 'pulse_purchase_refunded':
       return {
         title: 'Pagamento rimborsato',
-        body: `La serata da ${extra.venueName || 'questo locale'} era già finita: ti abbiamo rimborsato le Pulse.`,
+        body: `La serata da ${extra.venueName || 'questo locale'} era già finita: ti abbiamo rimborsato i Pulse.`,
       };
     case 'match':
       return { title: 'È un match! 🎉', body: `Tu e ${name} ora potete scrivervi` };

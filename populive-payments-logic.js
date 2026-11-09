@@ -126,10 +126,10 @@ async function initiateNightPulsePurchase({ userId, arenaSessionId, quantity }, 
             price_data: {
               currency: 'eur',
               product_data: {
-                name: `Pulse — drink al bancone di ${night.venue_name}, valide stasera`,
+                name: `Pulse — drink al bancone di ${night.venue_name}, validi stasera`,
                 description:
-                  `Una Pulse è una consumazione da ritirare al bancone di ${night.venue_name}. ` +
-                  `Valide solo stasera in questo locale: scadono alla chiusura (${closingTime}) e non vengono rimborsate.`,
+                  `Un Pulse è una consumazione da ritirare al bancone di ${night.venue_name}. ` +
+                  `Validi solo stasera in questo locale: scadono alla chiusura (${closingTime}) e non vengono rimborsati.`,
               },
               unit_amount: unitPriceCents,
             },
