@@ -15,7 +15,7 @@
  * ============================================================
  */
 
-const { refundPulseCredit, createIgnoredCooldownBlock } = require('./populive-interactions-logic');
+const { createIgnoredCooldownBlock } = require('./populive-interactions-logic');
 const { broadcastToOthers } = require('./populive-websocket-rooms');
 
 /**
@@ -211,51 +211,13 @@ async function handleCheckin({ userId, venueId, resumeSessionId }, { db, redis, 
   }
 
   // ------------------------------------------------------------
-  // STEP 2.5 — Un Pulse è legato al locale in cui è stato ricevuto.
-  // Decisione presa con l'utente (14/8), due regole diverse a
-  // seconda di cosa il destinatario ha fatto finora:
+  // STEP 2.5 — Cambio di locale.
+  // Le Pulse dal novembre 2026 (M11) restano legate al locale e alla
+  // serata in cui sono nate e scadono solo all'orario di chiusura
+  // (scheduler): cambiare locale non le tocca più. Prima una Pulse
+  // mai decisa scadeva qui e tornava a chi l'aveva mandata come
+  // credito valido ovunque.
   //
-  //   - MAI DECISA o LASCIATA IN SOSPESO (pending/ignored): appena
-  //     la persona fa check-in in un locale DIVERSO, consideriamo
-  //     la questione chiusa — chi l'ha mandata riceve INDIETRO un
-  //     credito Pulse (mai contanti veri, un credito equivalente),
-  //     e la Pulse stessa viene segnata scaduta. Prima di questo
-  //     momento però, il destinatario ha sempre una finestra vera
-  //     per ripensarci e accettarla comunque.
-  //
-  //   - GIÀ ACCETTATA (accepted): NON scade più cambiando locale —
-  //     i soldi sono già "vinti" dal destinatario in quel momento.
-  //     Resta semplicemente non ritirabile finché non torna nel
-  //     locale giusto (il controllo vero è già a monte, al momento
-  //     del riscatto — v. populive-api-server.js, confronto tra
-  //     origin_venue_id e il locale in cui si prova a riscattare).
-  const abandonedPulses = await db.queryAll(
-    `
-    SELECT p.id, p.sender_id
-    FROM pulses p
-    JOIN arena_sessions a ON a.id = p.arena_session_id
-    WHERE p.receiver_id = $1
-      AND p.status IN ('pending', 'ignored')
-      AND a.venue_id != $2
-  `,
-    [userId, venueId]
-  );
-
-  for (const p of abandonedPulses) {
-    await refundPulseCredit({ userId: p.sender_id }, { db });
-    await createIgnoredCooldownBlock({ ignoredUserId: p.sender_id, ignorerUserId: userId }, { db });
-  }
-
-  if (abandonedPulses.length > 0) {
-    await db.query(
-      `
-      UPDATE pulses SET status = 'expired'
-      WHERE id = ANY($1)
-    `,
-      [abandonedPulses.map((p) => p.id)]
-    );
-  }
-
   // Un Superlike mai deciso e abbandonato (cambio locale) passa a
   // "scaduto" — utile per lo storico di chi l'ha inviato (Like→
   // Inviati), anche se dal 25/8 il credito non torna più indietro

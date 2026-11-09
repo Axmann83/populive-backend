@@ -124,7 +124,7 @@ async function unregisterPushToken({ userId, token }, { db }) {
  * invece di accumularsi (Android `tag`, iOS `apns-collapse-id`):
  * tutti i Like in una sola notifica, i messaggi una per chat.
  */
-function buildContent(event, { senderName, drinkName, conversationId }) {
+function buildContent(event, { senderName, drinkName, conversationId, extra = {} }) {
   const name = senderName || 'Qualcuno';
   switch (event) {
     case 'like':
@@ -134,7 +134,21 @@ function buildContent(event, { senderName, drinkName, conversationId }) {
     case 'pulse':
       return {
         title: 'Pulse 🍹',
-        body: drinkName ? `${name} ti ha mandato una Pulse: ${drinkName}` : `${name} ti ha mandato una Pulse`,
+        body: drinkName ? `${name} ti ha mandato una Pulse: ${drinkName}` : `${name} ti offre un drink con una Pulse`,
+      };
+    // Un'ora prima della chiusura (M11): Pulse comprate e non usate, o
+    // drink ricevuti e non ritirati, scadono alla fine della serata.
+    case 'pulse_night_ending':
+      return {
+        title: 'La serata sta per finire',
+        body: pulseNightEndingText(extra),
+        group: `pulse_night_${extra.arenaSessionId || ''}`,
+      };
+    // Pagamento arrivato quando la serata era già finita: rimborsato.
+    case 'pulse_purchase_refunded':
+      return {
+        title: 'Pagamento rimborsato',
+        body: `La serata da ${extra.venueName || 'questo locale'} era già finita: ti abbiamo rimborsato le Pulse.`,
       };
     case 'match':
       return { title: 'È un match! 🎉', body: `Tu e ${name} ora potete scrivervi` };
@@ -149,6 +163,19 @@ function buildContent(event, { senderName, drinkName, conversationId }) {
   }
 }
 
+/**
+ * Testo dell'avviso di fine serata (M11), uguale per push e app:
+ * "Alle 02:00 finisce la serata da X: hai ancora 2 Pulse da usare e
+ * 1 drink da ritirare. Dopo scadono."
+ */
+function pulseNightEndingText({ venueName, closingTime, pulsesLeft = 0, toCollect = 0 }) {
+  const parts = [];
+  if (pulsesLeft > 0) parts.push(`${pulsesLeft} Pulse da usare`);
+  if (toCollect > 0) parts.push(`${toCollect} drink da ritirare al bancone`);
+  const when = closingTime ? `Alle ${closingTime}` : "Tra meno di un'ora";
+  return `${when} finisce la serata da ${venueName || 'questo locale'}: hai ancora ${parts.join(' e ')}. Dopo scadono.`;
+}
+
 // ------------------------------------------------------------
 // INVIO
 // ------------------------------------------------------------
@@ -159,13 +186,15 @@ function buildContent(event, { senderName, drinkName, conversationId }) {
  * Si chiama SENZA await, accanto all'evento socket: non lancia mai
  * errori e non deve rallentare né far fallire un Like o un messaggio.
  *
- * @param event 'like' | 'superlike' | 'pulse' | 'match' | 'message' | 'report'
+ * @param event 'like' | 'superlike' | 'pulse' | 'match' | 'message' | 'report' |
+ *   'pulse_night_ending' | 'pulse_purchase_refunded'
  * @param senderId chi ha causato l'evento; il nome si mostra solo se
  *   revealSender è vero (mai per il Like, né per la Pulse anonima)
  * @param data id utili all'app per aprire la schermata giusta al tocco
+ * @param extra valori per il testo (avviso di fine serata, rimborso)
  */
 async function notifyUser(
-  { userId, event, senderId = null, revealSender = false, drinkName = null, data = {} },
+  { userId, event, senderId = null, revealSender = false, drinkName = null, data = {}, extra = {} },
   { db }
 ) {
   try {
@@ -187,7 +216,7 @@ async function notifyUser(
       senderName = sender?.display_name || null;
     }
 
-    const content = buildContent(event, { senderName, drinkName, conversationId: data.conversationId });
+    const content = buildContent(event, { senderName, drinkName, conversationId: data.conversationId, extra });
     if (!content) return;
 
     // FCM vuole solo stringhe nei dati.
@@ -233,4 +262,4 @@ async function notifyUser(
   }
 }
 
-module.exports = { registerPushToken, unregisterPushToken, notifyUser };
+module.exports = { registerPushToken, unregisterPushToken, notifyUser, pulseNightEndingText };

@@ -94,6 +94,9 @@ async function getPopularDrinks({ venueId, fromDate, toDate }, { db }) {
     WHERE arena_sessions.venue_id = $1
       AND arena_sessions.session_date BETWEEN $2 AND $3
       AND pulses.status = 'redeemed'
+      -- Dal novembre 2026 (M11) la Pulse non registra più il drink (lo
+      -- si sceglie al bancone): restano solo quelle di prima.
+      AND pulses.drink_type IS NOT NULL
     GROUP BY pulses.drink_type
     ORDER BY redemptions DESC
   `,
@@ -412,50 +415,74 @@ async function getPeakConcurrentAttendance({ venueId, fromDate, toDate }, { db }
 }
 
 /**
- * Report commissioni per locale — quante Pulse sono state
- * riscattate lì (contate tutte, non solo negli ultimi 30 giorni,
- * dato che serve sapere il totale da girare, non solo l'andamento
- * recente) e quanto spetta al locale in base alla percentuale
- * d'accordo. Il valore di riferimento per Pulse è il prezzo
- * ATTUALE del pacchetto singolo (pulse_single_1) — un'approssimazione
- * dichiarata, dato che i crediti possono venire da fonti diverse
- * (gratis, pre-pagati, acquistati), non un calcolo esatto centesimo
- * per centesimo.
+ * Pulse di un locale (M11, novembre 2026), dall'inizio: ritirate al
+ * bancone (al locale spetta commission_venue_pct % del loro prezzo),
+ * accettate ma scadute senza ritiro, e incasso su Stripe (un unico
+ * conto, quello di PopuLive: N7; il locale si paga fuori dall'app).
+ * Il prezzo è quello registrato su ogni Pulse (il prezzo della serata
+ * pagato da chi l'ha inviata), non più il prezzo attuale del locale.
+ */
+const PULSE_TOTALS_SQL = `
+    SELECT
+      COUNT(*) FILTER (WHERE p.status = 'redeemed') AS redeemed_count,
+      COALESCE(SUM(p.price_cents) FILTER (WHERE p.status = 'redeemed'), 0) AS redeemed_cents,
+      COUNT(*) FILTER (WHERE p.status = 'expired' AND p.redeem_code IS NOT NULL) AS expired_uncollected_count,
+      COALESCE(SUM(p.price_cents) FILTER (WHERE p.status = 'expired' AND p.redeem_code IS NOT NULL), 0)
+        AS expired_uncollected_cents
+    FROM pulses p
+    JOIN arena_sessions a ON a.id = p.arena_session_id
+    WHERE a.venue_id = $1 AND p.payment_status IS DISTINCT FROM 'test'
+  `;
+
+const PULSE_REVENUE_SQL = `
+    SELECT COALESCE(SUM(pp.total_cents), 0) AS paid_cents,
+           COALESCE(SUM(pp.quantity), 0) AS paid_pulses
+    FROM pulse_purchases pp
+    JOIN arena_sessions a ON a.id = pp.arena_session_id
+    WHERE a.venue_id = $1 AND pp.status = 'paid'
+  `;
+
+async function getVenuePulseTotals(venue, { db }) {
+  const totals = await db.query(PULSE_TOTALS_SQL, [venue.id]);
+  const revenue = await db.query(PULSE_REVENUE_SQL, [venue.id]);
+  const redeemedCents = parseInt(totals?.redeemed_cents) || 0;
+  return {
+    redeemedCount: parseInt(totals?.redeemed_count) || 0,
+    redeemedCents,
+    venueOwedCents: Math.round(redeemedCents * ((venue.commission_venue_pct || 0) / 100)),
+    expiredUncollectedCount: parseInt(totals?.expired_uncollected_count) || 0,
+    expiredUncollectedCents: parseInt(totals?.expired_uncollected_cents) || 0,
+    paidPulses: parseInt(revenue?.paid_pulses) || 0,
+    paidCents: parseInt(revenue?.paid_cents) || 0,
+  };
+}
+
+/**
+ * Report commissioni per locale (locali partner, gli unici in cui si
+ * vendono Pulse): quante ritirate, quanto spetta al locale, quante
+ * scadute senza ritiro e quanto incassato su Stripe.
  */
 async function getCommissionsReport({}, { db }) {
-  const rows = await db.queryAll(`
-    SELECT
-      v.id, v.name, v.commission_venue_pct, v.pulse_price_cents,
-      v.spending_threshold_cents, v.spending_bonus_points,
-      COUNT(p.id) AS redeemed_count
-    FROM venues v
-    LEFT JOIN pulses p ON p.redeemed_venue_id = v.id AND p.status = 'redeemed'
-    WHERE v.is_partner = true
-    GROUP BY v.id, v.name, v.commission_venue_pct, v.pulse_price_cents, v.spending_threshold_cents, v.spending_bonus_points
-    ORDER BY redeemed_count DESC
+  const venues = await db.queryAll(`
+    SELECT id, name, commission_venue_pct, pulse_price_cents, spending_threshold_cents, spending_bonus_points
+    FROM venues
+    WHERE is_partner = true
+    ORDER BY name
   `);
 
-  return rows.map((r) => {
-    const redeemedCount = parseInt(r.redeemed_count) || 0;
-    // Usa il prezzo VERO di questo locale (ora per-locale, non più
-    // un riferimento globale) — se il locale non ha ancora un
-    // prezzo impostato, l'importo resta 0, onestamente, non un
-    // numero inventato.
-    const pricePerPulseCents = r.pulse_price_cents || 0;
-    const totalCents = redeemedCount * pricePerPulseCents;
-    const venuePct = r.commission_venue_pct;
-    const venueOwedCents = Math.round(totalCents * (venuePct / 100));
-
-    return {
-      venueId: r.id,
-      venueName: r.name,
-      commissionVenuePct: venuePct,
-      redeemedCount,
-      venueOwedCents,
-      spendingThresholdCents: r.spending_threshold_cents,
-      spendingBonusPoints: r.spending_bonus_points,
-    };
-  });
+  const report = [];
+  for (const v of venues) {
+    report.push({
+      venueId: v.id,
+      venueName: v.name,
+      commissionVenuePct: v.commission_venue_pct,
+      pulsePriceCents: v.pulse_price_cents,
+      ...(await getVenuePulseTotals(v, { db })),
+      spendingThresholdCents: v.spending_threshold_cents,
+      spendingBonusPoints: v.spending_bonus_points,
+    });
+  }
+  return report.sort((x, y) => y.redeemedCount - x.redeemedCount);
 }
 
 /**
@@ -466,7 +493,7 @@ async function getCommissionsReport({}, { db }) {
 async function getVenueFullSettings({ venueId }, { db }) {
   const v = await db.query(
     `
-    SELECT id, name, commission_venue_pct, pulse_price_cents, pulse_bundle_5_price_cents,
+    SELECT id, name, commission_venue_pct, pulse_price_cents,
            spending_threshold_cents, spending_bonus_points, default_open_time, default_close_time,
            venue_type, is_partner, min_users_for_local_ranking
     FROM venues WHERE id = $1
@@ -476,14 +503,20 @@ async function getVenueFullSettings({ venueId }, { db }) {
 
   if (!v) return { success: false, reason: 'venue_not_found' };
 
-  const redeemed = await db.query(
+  // La serata in corso, se c'è e le sue Pulse non sono ancora scadute:
+  // il suo prezzo si cambia a parte da quello predefinito (N1).
+  const tonight = await db.query(
     `
-    SELECT COUNT(*) AS count FROM pulses WHERE redeemed_venue_id = $1 AND status = 'redeemed'
+    SELECT id, session_date, pulse_price_cents, pulse_deadline
+    FROM arena_sessions
+    WHERE venue_id = $1 AND closed_at IS NULL AND pulses_expired_at IS NULL AND pulse_deadline > now()
+    ORDER BY session_date DESC
+    LIMIT 1
   `,
     [venueId]
   );
-  const redeemedCount = parseInt(redeemed?.count) || 0;
-  const venueOwedCents = Math.round(redeemedCount * (v.pulse_price_cents || 0) * (v.commission_venue_pct / 100));
+
+  const totals = await getVenuePulseTotals(v, { db });
 
   return {
     success: true,
@@ -494,14 +527,20 @@ async function getVenueFullSettings({ venueId }, { db }) {
       isPartner: v.is_partner,
       commissionVenuePct: v.commission_venue_pct,
       pulsePriceCents: v.pulse_price_cents,
-      pulseBundle5PriceCents: v.pulse_bundle_5_price_cents,
+      tonight: tonight
+        ? {
+            arenaSessionId: tonight.id,
+            sessionDate: tonight.session_date,
+            pulsePriceCents: tonight.pulse_price_cents,
+            pulseDeadline: tonight.pulse_deadline,
+          }
+        : null,
+      ...totals,
       spendingThresholdCents: v.spending_threshold_cents,
       spendingBonusPoints: v.spending_bonus_points,
       minUsersForLocalRanking: v.min_users_for_local_ranking,
       defaultOpenTime: v.default_open_time,
       defaultCloseTime: v.default_close_time,
-      redeemedCount,
-      venueOwedCents,
     },
   };
 }

@@ -32,6 +32,8 @@ const { reflectPointsToConnector, placeDiscoveryMarker } = require('./populive-c
 // push va solo a chi subisce l'evento, mai a chi lo ha appena
 // causato (ha l'app aperta in quel momento).
 const { notifyUser } = require('./populive-push');
+// Pulse della serata (M11, novembre 2026): saldo, prezzo e fine serata.
+const { consumeNightPulse, returnNightPulse, expireNightPulses } = require('./populive-pulse-nights');
 
 // ------------------------------------------------------------
 // PARTE 0 — Like / Superlike semplici (senza Pulse allegata)
@@ -427,10 +429,8 @@ async function respondToSuperlike({ interactionId, receiverId, action }, { db, i
     // rispetto alla correzione del 22/8): il Superlike segue ora lo
     // stesso principio di Tinder/Hinge — una volta inviato è sempre
     // perso, qualunque sia l'esito (accettato/rifiutato/sospeso), a
-    // differenza della Pulse (che coinvolge un vero pagamento e quindi
-    // resta rimborsabile). Coerente con quanto già valeva da sempre
-    // per il Superlike allegato a un Pulse+Superlike, mai rimborsato
-    // nemmeno lui (refundPulseCredit tocca solo il credito Pulse).
+    // differenza della Pulse rifiutata, che torna nel saldo della
+    // serata di chi l'ha inviata (N3, M11).
 
     return { success: true, action, senderNotified: false };
   }
@@ -588,22 +588,9 @@ async function applyPurchaseEffect({ userId, productId, arenaSessionId, external
       }
       break;
 
-    case 'pulse_bundle':
-      // Un credito = una consumazione generica, il valore vero è
-      // deciso a monte con ogni locale — nessun controllo di prezzo
-      // qui: se qualcuno prova a chiedere un drink chiaramente fuori
-      // scala (es. un flûte di Dom Pérignon), è il BARTENDER a
-      // rifiutare guardando la consumazione richiesta sull'app,
-      // esattamente come già succede per il riscatto stesso. Mai una
-      // scadenza: restano validi finché non li usi, in qualunque
-      // locale partner presente e futuro.
-      await db.query(
-        `
-        UPDATE users SET paid_pulse_credits = paid_pulse_credits + $1 WHERE id = $2
-      `,
-        [config.credits, userId]
-      );
-      break;
+    // 'pulse_bundle' (crediti Pulse validi ovunque e per sempre) tolto
+    // nel novembre 2026: le Pulse si comprano per serata con Stripe
+    // (M11, populive-payments-logic.js).
 
     default:
       return { success: false, reason: `product_type non gestito: ${product.product_type}` };
@@ -720,12 +707,71 @@ async function canSendDirectContact({ senderId, receiverId }, { db }) {
 }
 
 // ------------------------------------------------------------
+// PARTE 1a — Invio di una Pulse (POST /api/pulses/send)
+// ------------------------------------------------------------
+// Dal novembre 2026 (M11) la Pulse si paga PRIMA, comprandone per la
+// serata (populive-payments-logic.js): inviarla scala una Pulse dal
+// saldo di quella serata, in un'unica query atomica. Senza saldo la
+// risposta è 'no_pulses_left' e l'app propone di comprarne. Niente
+// più scelta del drink dal listino (N2): la Pulse vale una
+// consumazione al prezzo della serata, che chi la riceve sceglie al
+// bancone. Anche gli account di prova passano dal saldo (comprano
+// senza Stripe).
+async function sendPulse({ senderId, receiverId, arenaSessionId }, { db, redis, io }) {
+  if (!arenaSessionId) return { success: false, reason: 'session_required' };
+  if (senderId === receiverId) {
+    return { success: false, reason: 'cannot_interact_with_self' };
+  }
+
+  // Il blocco manuale (B2) vale anche per gli account di prova.
+  if (await hasUserBlockBetween({ userAId: senderId, userBId: receiverId }, { db })) {
+    return { success: false, reason: 'blocked_by_receiver' };
+  }
+
+  const blocked = await db.query(
+    `
+    SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = $2 AND (arena_session_id IS NULL OR arena_session_id = $3 OR (reason = 'ignored_cooldown' AND expires_at > now()))
+  `,
+    [receiverId, senderId, arenaSessionId]
+  );
+  // Un account di prova non resta bloccato da un rifiuto precedente
+  // (stesso principio di Like/Superlike in sendInteraction).
+  const senderRow = await db.query(`SELECT is_test_account FROM users WHERE id = $1`, [senderId]);
+  if (blocked && !senderRow?.is_test_account) return { success: false, reason: 'blocked_by_receiver' };
+
+  // La Pulse svela subito chi la manda: rispetta le preferenze di
+  // contatto del destinatario.
+  const check = await canSendDirectContact({ senderId, receiverId }, { db });
+  if (!check.allowed) return { success: false, reason: check.reason };
+
+  const spent = await consumeNightPulse({ userId: senderId, arenaSessionId }, { db });
+  if (!spent.ok) return { success: false, reason: spent.reason };
+
+  try {
+    const result = await createPulseRecord(
+      {
+        senderId,
+        receiverId,
+        arenaSessionId,
+        drinkName: null,
+        priceCents: spent.priceCents,
+        paymentStatus: senderRow?.is_test_account ? 'test' : 'night_balance',
+      },
+      { db, redis, io }
+    );
+    return { ...result, available: spent.available };
+  } catch (err) {
+    // La Pulse non è nata: quella appena scalata torna nel saldo.
+    await returnNightPulse({ userId: senderId, arenaSessionId }, { db });
+    throw err;
+  }
+}
+
+// ------------------------------------------------------------
 // PARTE 1b — Creazione VERA della Pulse nel database. Volutamente
-// separata dall'invio: questa funzione presuppone che il pagamento
-// sia GIÀ risolto (gratis, account di prova, o confermato da Stripe)
-// — non fa mai controlli sui soldi, solo sulla logica del prodotto.
-// Chiamata da initiatePulsePurchase (per il caso gratis/test, subito)
-// e dal webhook Stripe (per il caso pagato, solo a conferma avvenuta).
+// separata dall'invio: presuppone che la Pulse sia GIÀ pagata (scalata
+// dal saldo della serata, v. sendPulse) — non fa mai controlli sui
+// soldi, solo sulla logica del prodotto.
 // ------------------------------------------------------------
 async function createPulseRecord(
   { senderId, receiverId, arenaSessionId, drinkName, priceCents, paymentStatus, stripeCheckoutSessionId },
@@ -809,9 +855,19 @@ async function createPulseRecord(
   // svela sempre chi la manda: un'offerta vera richiede che si sappia
   // da chi arriva (decisione esplicita dell'utente, 25/8).
   const senderProfile = await getSenderProfile(senderId, { db });
+  // Dove e entro quando si ritira (M11): solo in quel locale, entro la
+  // chiusura della serata.
+  const night = await db.query(
+    `SELECT a.pulse_deadline, v.id AS venue_id, v.name AS venue_name FROM arena_sessions a JOIN venues v ON v.id = a.venue_id WHERE a.id = $1`,
+    [arenaSessionId]
+  );
   io.to(`user_${receiverId}`).emit('pulse_received', {
     pulseId: pulse.id,
     tier,
+    venueId: night?.venue_id || null,
+    venueName: night?.venue_name || null,
+    deadline: night?.pulse_deadline || null,
+    priceCents,
     drinkType: drinkName,
     senderId,
     senderName: senderProfile?.displayName || null,
@@ -854,6 +910,14 @@ async function respondToPulse({ pulseId, receiverId, action }, { db, io }) {
   if (action === 'accept' && (await hasUserBlockBetween({ userAId: pulse.sender_id, userBId: receiverId }, { db }))) {
     return { success: false, reason: 'not_found_or_not_yours' };
   }
+  // Dopo la chiusura del locale la Pulse è scaduta (P3, M11), anche se
+  // lo scheduler (ogni 5 minuti) non l'ha ancora segnata.
+  const night = await db.query(`SELECT pulse_deadline > now() AS is_open FROM arena_sessions WHERE id = $1`, [
+    pulse.arena_session_id,
+  ]);
+  if (night && !night.is_open && ['pending', 'ignored'].includes(pulse.status)) {
+    return { success: false, reason: 'pulse_night_ended' };
+  }
   // "In sospeso" = "decido dopo" (D9, 2/10), v. respondToSuperlike.
   if (pulse.status === 'ignored' && action === 'ignore') {
     return { success: true, action, senderNotified: false }; // già in sospeso, niente da fare
@@ -893,13 +957,17 @@ async function respondToPulse({ pulseId, receiverId, action }, { db, io }) {
       [action === 'reject' ? 'rejected' : 'ignored', pulseId]
     );
 
-    // Rimborso SOLO per il rifiuto esplicito — è una decisione chiara
-    // e definitiva, nessun motivo di aspettare. Per "ignora" invece
-    // si aspetta che la persona lasci davvero il locale (v. STEP 2.5
-    // in populive-checkin-logic.js), lasciandole una finestra vera
-    // per ripensarci e accettarla comunque prima di quel momento.
+    // Rifiutata: la Pulse torna nel saldo della serata di chi l'ha
+    // inviata, valida fino alla chiusura (N3). "In sospeso" no: chi la
+    // riceve può ancora accettarla fino a fine serata, poi scade.
     if (action === 'reject') {
-      await refundPulseCredit({ userId: pulse.sender_id, pulseId: pulse.id }, { db });
+      const back = await returnNightPulse({ userId: pulse.sender_id, arenaSessionId: pulse.arena_session_id }, { db });
+      if (back.returned) {
+        io.to(`user_${pulse.sender_id}`).emit('pulse_balance_updated', {
+          arenaSessionId: pulse.arena_session_id,
+          available: back.available,
+        });
+      }
     }
 
     return { success: true, action, senderNotified: false };
@@ -1001,6 +1069,7 @@ async function getReceivedPulses({ userId }, { db }) {
   const pulses = await db.queryAll(
     `
     SELECT r.id, r.drink_type, r.tier, r.status, r.chat_unlocked, r.created_at, r.redeem_code,
+           r.price_cents, a.pulse_deadline,
            v.id AS venue_id, v.name AS venue_name,
            CASE WHEN r.tier IN ('super', 'simple') OR r.chat_unlocked THEN u.display_name ELSE NULL END AS sender_name,
            CASE WHEN r.tier IN ('super', 'simple') OR r.chat_unlocked THEN u.id ELSE NULL END AS sender_id,
@@ -1030,6 +1099,10 @@ async function getReceivedPulses({ userId }, { db }) {
     status: r.status,
     venueId: r.venue_id, // serve al frontend per capire se si è nel locale giusto per riscattare
     venueName: r.venue_name,
+    priceCents: r.price_cents,
+    // Fine della serata per le Pulse (chiusura del locale): dopo,
+    // quelle non ritirate scadono (M11).
+    deadline: r.pulse_deadline,
     senderName: r.sender_name, // null se ancora anonimo
     senderId: r.sender_id, // null se ancora anonimo — serve per aprire il profilo completo dalla riga
     senderPhotoUrl: r.sender_photo_url, // null se ancora anonimo
@@ -1055,7 +1128,8 @@ async function getReceivedPulses({ userId }, { db }) {
 async function getSentPulses({ userId }, { db }) {
   const pulses = await db.queryAll(
     `
-    SELECT r.id, r.drink_type, r.tier, r.status, r.created_at,
+    SELECT r.id, r.drink_type, r.tier, r.status, r.created_at, r.price_cents,
+           a.pulse_deadline,
            v.name AS venue_name,
            u.display_name AS receiver_name
     FROM pulses r
@@ -1082,6 +1156,8 @@ async function getSentPulses({ userId }, { db }) {
     tier: r.tier,
     status: r.status,
     venueName: r.venue_name,
+    priceCents: r.price_cents,
+    deadline: r.pulse_deadline,
     receiverName: r.receiver_name, // sempre visibile, l'ha scelto chi ha inviato
     createdAt: r.created_at,
   }));
@@ -1194,51 +1270,46 @@ async function blockBothDirectionsPermanently({ userAId, userBId, reason = 'matc
   );
 }
 
-async function refundPulseCredit({ userId }, { db }) {
-  await db.query(`UPDATE users SET paid_pulse_credits = paid_pulse_credits + 1 WHERE id = $1`, [userId]);
+/**
+ * ============================================================
+ * FINE SERATA PER LE PULSE (M11, novembre 2026)
+ * ============================================================
+ * All'orario di chiusura del locale (N6), dallo scheduler, e per
+ * sicurezza anche quando la serata finisce davvero (closeSession):
+ * saldi della serata azzerati, Pulse non ritirate scadute, senza
+ * rimborso (P2, P3). Prima una Pulse mai decisa tornava a chi l'aveva
+ * inviata come credito valido ovunque, e una accettata restava
+ * ritirabile per sempre: tolto. Resta il raffreddamento tra chi ha
+ * inviato una Pulse mai decisa e chi l'ha ricevuta (come prima).
+ * Una volta sola per serata (v. expireNightPulses).
+ * ============================================================
+ */
+async function expirePulsesForSession(arenaSessionId, { db, io }) {
+  const result = await expireNightPulses(arenaSessionId, { db });
+  if (result.alreadyDone) return result;
+
+  for (const p of result.expiredPulses) {
+    if (p.previous_status !== 'accepted') {
+      await createIgnoredCooldownBlock({ ignoredUserId: p.sender_id, ignorerUserId: p.receiver_id }, { db });
+    }
+  }
+
+  // L'app aperta aggiorna saldo ed elenco delle Pulse.
+  for (const userId of result.affectedUserIds) {
+    io?.to(`user_${userId}`).emit('pulse_night_ended', { arenaSessionId });
+  }
+  return result;
 }
 
 /**
  * ============================================================
- * SCADENZA A FINE SERATA — gemella del rimborso per cambio locale
+ * SCADENZA A FINE SERATA di Superlike e Like mai decisi
  * ============================================================
- * Buco trovato dall'utente (14/8): l'unico modo di loggarsi è un QR
- * code — se una persona resta nello stesso locale per sempre senza
- * mai scansionarne un altro, una Pulse mai decisa (pending/ignored)
- * potrebbe restare "in sospeso" per mesi, senza che scatti mai il
- * rimborso legato al cambio locale. Questa funzione chiude quel
- * buco: agganciata alla chiusura NATURALE della serata (quando
- * l'Arena si spegne da sola a fine orario), non solo al cambio
- * locale — chi non ha deciso nulla entro la fine della serata la
- * perde comunque, punto. Stessa identica sorte delle Pulse GIÀ
- * accettate però: quelle NON rientrano qui, restano valide a tempo
- * indeterminato come deciso in precedenza — solo pending/ignored.
+ * Agganciata alla fine vera della serata (closeSession). Le Pulse
+ * hanno la loro scadenza, all'orario di chiusura (qui sopra).
  * ============================================================
  */
-async function refundAbandonedPulsesForSession(arenaSessionId, { db }) {
-  const abandoned = await db.queryAll(
-    `
-    SELECT id, sender_id, receiver_id FROM pulses
-    WHERE arena_session_id = $1 AND status IN ('pending', 'ignored')
-  `,
-    [arenaSessionId]
-  );
-
-  for (const p of abandoned) {
-    await refundPulseCredit({ userId: p.sender_id }, { db });
-    await createIgnoredCooldownBlock({ ignoredUserId: p.sender_id, ignorerUserId: p.receiver_id }, { db });
-  }
-
-  if (abandoned.length > 0) {
-    await db.query(
-      `
-      UPDATE pulses SET status = 'expired'
-      WHERE id = ANY($1)
-    `,
-      [abandoned.map((p) => p.id)]
-    );
-  }
-
+async function expireUndecidedInteractionsForSession(arenaSessionId, { db }) {
   // Un Superlike mai deciso, a fine serata — passa a "scaduto" per
   // lo storico, ma dal 25/8 il credito non torna più indietro (v.
   // spiegazione completa in populive-checkin-logic.js, STEP 2.5).
@@ -1519,28 +1590,6 @@ async function hasUserBlockBetween({ userAId, userBId }, { db }) {
 }
 
 /**
- * Saldo Pulse disponibili per l'invio — separato tra quelli
- * gratuiti settimanali e quelli pre-pagati (comprati in pacchetto,
- * mai a scadenza), così il frontend può mostrarli distinti se serve
- * ma anche il totale utilizzabile subito.
- */
-async function getPulseBalance({ userId }, { db }) {
-  const user = await db.query(
-    `
-    SELECT free_pulses_balance, paid_pulse_credits FROM users WHERE id = $1
-  `,
-    [userId]
-  );
-  if (!user) return { success: false, reason: 'user_not_found' };
-
-  return {
-    success: true,
-    freeBalance: user.free_pulses_balance || 0,
-    paidCredits: user.paid_pulse_credits || 0,
-  };
-}
-
-/**
  * ============================================================
  * CENTRO NOTIFICHE — ora SOLO storico degli esiti (23/8)
  * ============================================================
@@ -1790,7 +1839,6 @@ module.exports = {
   respondToSuperlike,
   getReceivedPulses,
   getSentPulses,
-  getPulseBalance,
   getInteractionHistory,
   getUnseenNotificationCount,
   markNotificationsSeen,
@@ -1798,8 +1846,9 @@ module.exports = {
   clearAllNotifications,
   dismissPulseView,
   clearAllPulseViews,
-  refundPulseCredit,
-  refundAbandonedPulsesForSession,
+  sendPulse,
+  expirePulsesForSession,
+  expireUndecidedInteractionsForSession,
   getPermanentlyBlockedPairUserIds,
   hasUserBlockBetween,
   blockBothDirectionsPermanently,

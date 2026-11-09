@@ -21,7 +21,8 @@ const {
   awardTopTalentBonuses,
   awardTopTableActivityBonuses,
 } = require('./populive-connector-engine');
-const { refundAbandonedPulsesForSession } = require('./populive-interactions-logic');
+const { expirePulsesForSession, expireUndecidedInteractionsForSession } = require('./populive-interactions-logic');
+const { sendEndOfNightReminders } = require('./populive-pulse-nights');
 const { expireOldCheckins } = require('./populive-checkin-logic');
 
 const TICK_INTERVAL_MS = 5 * 60 * 1000; // ogni 5 minuti — abbastanza spesso da non far
@@ -74,21 +75,23 @@ async function runSchedulerTick({ db, redis, io }) {
     console.error('[scheduler] errore nella pulizia messaggi chat scaduti:', err);
   }
 
-  // Pulse gratis settimanale: un'unica query copre tutti gli
-  // utenti insieme, non serve girare uno per uno. Chi ha già 2
-  // Pulse gratis (il tetto massimo) resta escluso E il suo
-  // contatore non avanza — così, appena ne spende una e si libera
-  // spazio, viene ricaricato subito al giro successivo invece di
-  // dover aspettare altri 7 giorni interi.
+  // Pulse della serata (M11): avviso un'ora prima della chiusura del
+  // locale, poi scadenza all'orario di chiusura. Le Pulse gratis
+  // settimanali non ci sono più (N4, novembre 2026).
   try {
-    await grantWeeklyFreePulses({ db });
+    await sendEndOfNightReminders({ db, io });
   } catch (err) {
-    console.error("[scheduler] errore nell'assegnazione Pulse gratis settimanali:", err);
+    console.error("[scheduler] errore nell'avviso di fine serata per le Pulse:", err);
+  }
+  try {
+    await expireEndedPulseNights({ db, io });
+  } catch (err) {
+    console.error('[scheduler] errore nella scadenza delle Pulse a fine serata:', err);
   }
 
-  // Saldo Superlike: stesso principio della Pulse gratis — parte da
-  // 5, si ricarica di +5 a settimana se non lo finisci, mai oltre
-  // il tetto di 10 (né per accumulo gratuito né per acquisto).
+  // Saldo Superlike: parte da 5, si ricarica di +5 a settimana se non
+  // lo finisci, mai oltre il tetto di 10 (né per accumulo gratuito né
+  // per acquisto).
   try {
     await grantWeeklySuperlikes({ db });
   } catch (err) {
@@ -106,14 +109,24 @@ async function grantWeeklySuperlikes({ db }) {
   `);
 }
 
-async function grantWeeklyFreePulses({ db }) {
-  await db.query(`
-    UPDATE users
-    SET free_pulses_balance = LEAST(free_pulses_balance + 1, 2),
-        last_free_pulse_grant_at = last_free_pulse_grant_at + INTERVAL '7 days'
-    WHERE last_free_pulse_grant_at <= now() - INTERVAL '7 days'
-      AND free_pulses_balance < 2
-  `);
+// Le serate arrivate all'orario di chiusura (per le Pulse, N6) e non
+// ancora fatte scadere. Una serata con un problema non blocca le altre.
+async function expireEndedPulseNights({ db, io }) {
+  const ended = await db.queryAll(
+    `
+    SELECT id FROM arena_sessions
+    WHERE pulses_expired_at IS NULL AND pulse_deadline <= now()
+    ORDER BY pulse_deadline
+  `,
+    []
+  );
+  for (const night of ended) {
+    try {
+      await expirePulsesForSession(night.id, { db, io });
+    } catch (err) {
+      console.error(`[scheduler] scadenza Pulse fallita per la serata ${night.id}:`, err);
+    }
+  }
 }
 
 /**
@@ -130,8 +143,9 @@ async function grantWeeklyFreePulses({ db }) {
  *   3. FINITA (closed_at valorizzato, closeSession): quando inizia la
  *      serata nuova dello stesso locale, oppure quando dopo l'orario
  *      non resta più nessuno dentro (tutti usciti, o dopo 24 ore dal
- *      check-in: v. expireOldCheckins). Solo qui si chiudono chat,
- *      rimborsi delle Pulse e bonus di fine serata.
+ *      check-in: v. expireOldCheckins). Solo qui si chiudono chat e
+ *      bonus di fine serata. Le Pulse invece scadono già all'orario
+ *      di chiusura del locale (pulse_deadline, M11).
  * Un locale chiuso anche solo un secondo tra un giorno e l'altro ha
  * quindi due serate distinte; uno aperto 24 ore su 24 (apertura =
  * chiusura, es. 06:00-06:00) cambia serata ogni giorno all'orario di
@@ -285,8 +299,8 @@ async function closeEmptySessions(venue, { db, redis, io }) {
 // La fine vera e propria di UNA serata (momento 3): blocchiamo nuovi
 // check-in, congeliamo la classifica locale, chiudiamo le chat di
 // quella sessione (rispettando il doppio consenso "conserva"),
-// rimborsiamo chi ha inviato una Pulse mai decisa dal destinatario, e
-// puliamo lo stato vivo in Redis — i punti restano per sempre nel
+// facciamo scadere ciò che resta da decidere, e puliamo lo stato vivo
+// in Redis — i punti restano per sempre nel
 // ledger, solo il "vivo" della serata sparisce.
 async function closeSession(sessionId, { db, redis, io }) {
   await db.query(
@@ -310,14 +324,12 @@ async function closeSession(sessionId, { db, redis, io }) {
   // chiude solo quelle senza consenso reciproco.
   await closeConversationsForSession(sessionId, { db });
 
-  // Pulse mai decise (pending/ignored) — buco trovato dal vivo:
-  // restare nello stesso locale per sempre, senza mai scansionare
-  // un altro QR, avrebbe permesso di rimandare la decisione a
-  // tempo indeterminato. A fine serata la questione si chiude
-  // comunque, con lo stesso rimborso già previsto per il cambio
-  // locale. Le Pulse GIÀ accettate non c'entrano, restano valide
-  // come deciso in precedenza.
-  await refundAbandonedPulsesForSession(sessionId, { db });
+  // Le Pulse scadono di norma all'orario di chiusura (scheduler, qui
+  // sopra); se la serata finisce prima (es. orari cambiati) scadono
+  // qui. Non fa nulla se è già stato fatto. Poi Superlike e Like mai
+  // decisi.
+  await expirePulsesForSession(sessionId, { db, io });
+  await expireUndecidedInteractionsForSession(sessionId, { db });
 
   // Bonus "talent scout" di fine serata (17/9) — i Connector dei tre
   // tavoli diversi con dentro la persona più popolare della sera.

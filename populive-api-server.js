@@ -33,7 +33,7 @@ const {
   respondToSuperlike,
   getReceivedPulses,
   getSentPulses,
-  getPulseBalance,
+  sendPulse,
   getInteractionHistory,
   getUnseenNotificationCount,
   markNotificationsSeen,
@@ -59,11 +59,12 @@ const {
   unsuspendUser,
 } = require('./populive-moderation-logic');
 const {
-  initiatePulsePurchase,
+  initiateNightPulsePurchase,
+  syncPendingNightPurchases,
   initiatePurchase,
-  initiateVenuePulseCreditsPurchase,
   handleStripeWebhook,
 } = require('./populive-payments-logic');
+const { getPulseNightInfo } = require('./populive-pulse-nights');
 const {
   sendMessage,
   getMessages,
@@ -571,11 +572,38 @@ app.post(
 // ------------------------------------------------------------
 // PULSE
 // ------------------------------------------------------------
+// Pulse della serata (M11): prezzo, chiusura e saldo di chi chiede.
 app.get(
-  '/api/users/:userId/pulse-balance',
+  '/api/arena-sessions/:arenaSessionId/pulse-night',
   requireOnboarded,
   ah(async (req, res) => {
-    const result = await getPulseBalance({ userId: req.userId }, { db });
+    const result = await getPulseNightInfo({ userId: req.userId, arenaSessionId: req.params.arenaSessionId }, { db });
+    res.json(result);
+  })
+);
+
+// Compra N Pulse per la serata in cui si è dentro: risponde con
+// l'indirizzo della pagina di pagamento di Stripe (o accredita subito
+// per gli account di prova).
+app.post(
+  '/api/pulse-purchases',
+  requireOnboarded,
+  ah(async (req, res) => {
+    const { arenaSessionId, quantity } = req.body;
+    const result = await initiateNightPulsePurchase(
+      { userId: req.userId, arenaSessionId, quantity: Number(quantity) },
+      deps
+    );
+    res.json(result);
+  })
+);
+
+// Ritorno da Stripe: controlla gli acquisti ancora in attesa.
+app.post(
+  '/api/pulse-purchases/sync',
+  requireOnboarded,
+  ah(async (req, res) => {
+    const result = await syncPendingNightPurchases({ userId: req.userId, since: req.body?.since }, deps);
     res.json(result);
   })
 );
@@ -620,16 +648,8 @@ app.post(
   '/api/pulses/send',
   requireOnboarded,
   ah(async (req, res) => {
-    const { receiverId, arenaSessionId, drinkProductId } = req.body;
-    const result = await initiatePulsePurchase(
-      {
-        senderId: req.userId,
-        receiverId,
-        arenaSessionId,
-        drinkProductId,
-      },
-      deps
-    );
+    const { receiverId, arenaSessionId } = req.body;
+    const result = await sendPulse({ senderId: req.userId, receiverId, arenaSessionId }, deps);
     res.json(result);
   })
 );
@@ -851,17 +871,36 @@ app.post(
   '/api/dashboard/venues/:venueId/pulse-prices',
   requireArchitect,
   ah(async (req, res) => {
-    const { singlePriceCents, bundle5PriceCents } = req.body;
-    // Entrambi facoltativi — un Architetto può impostare solo uno dei
-    // due se è quello che ha concordato con il locale, l'altro resta
-    // vuoto (null) finché non viene impostato a sua volta.
-    await db.query(
-      `
-    UPDATE venues SET pulse_price_cents = $1, pulse_bundle_5_price_cents = $2 WHERE id = $3
-  `,
-      [singlePriceCents || null, bundle5PriceCents || null, req.params.venueId]
-    );
-    res.json({ success: true });
+    // Prezzo di una Pulse (M11, N1): quello predefinito del locale
+    // (da cui nasce ogni serata nuova) e/o quello della serata in
+    // corso. Le Pulse già comprate tengono il prezzo pagato.
+    const { defaultPriceCents, tonightPriceCents } = req.body;
+    const isValidPrice = (v) => Number.isInteger(v) && v >= 50 && v <= 100000;
+    if (defaultPriceCents == null && tonightPriceCents == null) {
+      return res.json({ success: false, reason: 'price_required' });
+    }
+    if (
+      (defaultPriceCents != null && !isValidPrice(defaultPriceCents)) ||
+      (tonightPriceCents != null && !isValidPrice(tonightPriceCents))
+    ) {
+      return res.json({ success: false, reason: 'invalid_price' });
+    }
+    if (defaultPriceCents != null) {
+      await db.query(`UPDATE venues SET pulse_price_cents = $1 WHERE id = $2`, [defaultPriceCents, req.params.venueId]);
+    }
+    let tonightUpdated = false;
+    if (tonightPriceCents != null) {
+      const row = await db.query(
+        `
+      UPDATE arena_sessions SET pulse_price_cents = $1
+      WHERE venue_id = $2 AND closed_at IS NULL AND pulses_expired_at IS NULL AND pulse_deadline > now()
+      RETURNING id
+    `,
+        [tonightPriceCents, req.params.venueId]
+      );
+      tonightUpdated = !!row;
+    }
+    res.json({ success: true, tonightUpdated });
   })
 );
 
@@ -879,6 +918,15 @@ app.post(
   `,
       [openTime, closeTime, req.params.venueId]
     );
+    // La chiusura della serata in corso segue l'orario nuovo: è quella
+    // in cui scadono le Pulse (M11). Solo se non sono già scadute.
+    await db.query(
+      `
+    UPDATE arena_sessions SET pulse_deadline = pulse_deadline_for(venue_id, session_date), pulse_reminder_sent_at = NULL
+    WHERE venue_id = $1 AND closed_at IS NULL AND pulses_expired_at IS NULL
+  `,
+      [req.params.venueId]
+    );
     res.json({ success: true });
   })
 );
@@ -889,37 +937,6 @@ app.post(
   ah(async (req, res) => {
     const { productId, arenaSessionId } = req.body;
     const result = await initiatePurchase({ userId: req.userId, productId, arenaSessionId }, { db });
-    res.json(result);
-  })
-);
-
-app.get(
-  '/api/venues/:venueId/pulse-prices',
-  ah(async (req, res) => {
-    const venue = await db.query(
-      `
-    SELECT pulse_price_cents, pulse_bundle_5_price_cents FROM venues WHERE id = $1
-  `,
-      [req.params.venueId]
-    );
-    if (!venue) return res.json({ success: false, reason: 'venue_not_found' });
-    res.json({
-      success: true,
-      singlePriceCents: venue.pulse_price_cents,
-      bundle5PriceCents: venue.pulse_bundle_5_price_cents,
-    });
-  })
-);
-
-app.post(
-  '/api/venues/:venueId/pulse-credits/purchase',
-  requireOnboarded,
-  ah(async (req, res) => {
-    const { quantity } = req.body;
-    const result = await initiateVenuePulseCreditsPurchase(
-      { userId: req.userId, venueId: req.params.venueId, quantity },
-      { db }
-    );
     res.json(result);
   })
 );
@@ -1164,27 +1181,6 @@ app.get(
 );
 
 // ------------------------------------------------------------
-// DRINK DISPONIBILI IN UN LOCALE (per la schermata di invio Pulse)
-// ------------------------------------------------------------
-app.get(
-  '/api/venues/:venueId/drinks',
-  ah(async (req, res) => {
-    const drinks = await db.queryAll(
-      `
-    SELECT dp.id, dp.name, dp.base_price_cents, dp.sponsor_discount_cents, bs.name AS sponsor_name
-    FROM venue_drink_catalog vdc
-    JOIN drink_products dp ON dp.id = vdc.drink_product_id
-    LEFT JOIN brand_sponsors bs ON bs.id = dp.brand_sponsor_id
-    WHERE vdc.venue_id = $1 AND dp.is_active = true
-    ORDER BY dp.base_price_cents ASC
-  `,
-      [req.params.venueId]
-    );
-    res.json({ success: true, drinks });
-  })
-);
-
-// ------------------------------------------------------------
 // RISCATTO REALE AL BANCONE — chiamato dal telefono del CLIENTE
 // nel momento in cui il bartender stesso tocca il sigillo attivo
 // sul suo schermo. Non serve nessun dispositivo o account separato
@@ -1195,37 +1191,40 @@ app.get(
 // ------------------------------------------------------------
 app.post(
   '/api/pulses/:pulseId/redeem',
+  // Dal novembre 2026 (M11) serve l'accesso, e la Pulse deve essere di
+  // chi la riscatta: prima bastavano id e codice (v. "Sicurezza delle
+  // rotte" in SPEC-bug-migliorie.md).
+  requireOnboarded,
   ah(async (req, res) => {
     const { redeemCode, venueId } = req.body;
 
     // Il locale del riscatto è OBBLIGATORIO — e deve corrispondere
     // ESATTAMENTE al locale in cui il Pulse è stato ricevuto: chi lo
-    // riceve può ritirarlo SOLO lì, non altrove. Aggiornato il 14/8:
-    // andarsene in un altro locale NON fa più perdere la Pulse per
-    // sempre (prima sì) — resta semplicemente non ritirabile finché
-    // non si torna nel locale giusto, anche giorni dopo. Più semplice
-    // per la contabilità (nessun dubbio su a chi girare la
-    // commissione) e un incentivo in più per il locale a farsi
-    // rivedere da chi vuole godersi il regalo.
+    // riceve può ritirarlo SOLO lì, non altrove, e solo entro la
+    // chiusura del locale di quella serata (M11, novembre 2026; prima
+    // restava ritirabile anche giorni dopo). Uscire e rientrare la
+    // stessa sera non la fa perdere.
     if (!venueId) {
       return res.json({ success: false, reason: 'venue_required_for_redeem' });
     }
 
     const pulse = await db.query(
       `
-    SELECT p.*, a.venue_id AS origin_venue_id
+    SELECT p.*, a.venue_id AS origin_venue_id, a.pulse_deadline > now() AS night_open
     FROM pulses p
     JOIN arena_sessions a ON a.id = p.arena_session_id
-    WHERE p.id = $1 AND p.redeem_code = $2
+    WHERE p.id = $1 AND p.redeem_code = $2 AND p.receiver_id = $3
   `,
-      [req.params.pulseId, redeemCode]
+      [req.params.pulseId, redeemCode, req.userId]
     );
 
     if (!pulse) {
       return res.json({ success: false, reason: 'invalid_code_or_already_redeemed' });
     }
-    if (pulse.status === 'expired') {
-      return res.json({ success: false, reason: 'pulse_expired_changed_venue' });
+    // Scaduta alla chiusura del locale (M11), anche se lo scheduler non
+    // l'ha ancora segnata.
+    if (pulse.status === 'expired' || (pulse.status === 'accepted' && !pulse.night_open)) {
+      return res.json({ success: false, reason: 'pulse_expired' });
     }
     if (pulse.status !== 'accepted') {
       return res.json({ success: false, reason: 'invalid_code_or_already_redeemed' });
