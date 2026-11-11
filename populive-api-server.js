@@ -62,6 +62,7 @@ const {
   initiateNightPulsePurchase,
   syncPendingNightPurchases,
   initiatePurchase,
+  appReturnTarget,
   handleStripeWebhook,
 } = require('./populive-payments-logic');
 const { getPulseNightInfo } = require('./populive-pulse-nights');
@@ -589,14 +590,25 @@ app.post(
   '/api/pulse-purchases',
   requireOnboarded,
   ah(async (req, res) => {
-    const { arenaSessionId, quantity } = req.body;
+    const { arenaSessionId, quantity, appReturn } = req.body;
     const result = await initiateNightPulsePurchase(
-      { userId: req.userId, arenaSessionId, quantity: Number(quantity) },
+      { userId: req.userId, arenaSessionId, quantity: Number(quantity), appReturn: appReturn === true },
       deps
     );
     res.json(result);
   })
 );
+
+// Ritorno da Stripe nell'app iOS (B18): Stripe arriva qui e noi
+// rimandiamo a populive://app/?…, che chiude la pagina di pagamento
+// nell'app (ASWebAuthenticationSession). Senza accesso: porta solo
+// l'esito, il controllo vero lo fa /api/pulse-purchases/sync.
+app.get('/api/app-return', (req, res) => {
+  const query = new URLSearchParams(req.query).toString();
+  const target = appReturnTarget(query);
+  if (!target) return res.status(400).send('Indirizzo non valido');
+  res.redirect(302, target);
+});
 
 // Ritorno da Stripe: controlla gli acquisti ancora in attesa.
 app.post(
@@ -935,8 +947,11 @@ app.post(
   '/api/purchases/initiate',
   requireOnboarded,
   ah(async (req, res) => {
-    const { productId, arenaSessionId } = req.body;
-    const result = await initiatePurchase({ userId: req.userId, productId, arenaSessionId }, { db });
+    const { productId, arenaSessionId, appReturn } = req.body;
+    const result = await initiatePurchase(
+      { userId: req.userId, productId, arenaSessionId, appReturn: appReturn === true },
+      { db }
+    );
     res.json(result);
   })
 );

@@ -48,6 +48,42 @@ function getStripeClient() {
 // server di controllare l'acquisto (syncPendingNightPurchases).
 const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL || 'https://populive-frontend-production.up.railway.app';
 
+// Indirizzo pubblico di questo backend (Railway lo dà in
+// RAILWAY_PUBLIC_DOMAIN). Serve al ritorno da Stripe nell'app iOS.
+const BACKEND_BASE_URL =
+  process.env.BACKEND_BASE_URL ||
+  (process.env.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+    : 'https://populive-backend-production.up.railway.app');
+
+/**
+ * Indirizzi di ritorno da Stripe (B18, 11/11). Sul web e su Android
+ * Stripe rimanda alla pagina del frontend (su Android l'App Link riapre
+ * l'app). Su iPhone il rimando automatico non apre un Universal Link
+ * (iOS li apre solo se li tocca l'utente): l'app apre la pagina di
+ * pagamento con ASWebAuthenticationSession, che si chiude da sola
+ * quando la pagina va su populive://… — ci arriva da /api/app-return
+ * qui nel backend, perché Stripe vuole indirizzi https.
+ * `query` è la parte dopo "/?" (es. "pulse_purchase=done").
+ */
+function checkoutReturnUrl(query, appReturn) {
+  if (appReturn) return `${BACKEND_BASE_URL}/api/app-return?${query}`;
+  return `${FRONTEND_BASE_URL}/?${query}`;
+}
+
+// Le sole risposte che /api/app-return passa all'app.
+const APP_RETURN_QUERIES = new Set([
+  'pulse_purchase=done',
+  'pulse_purchase=cancelled',
+  'purchase_sent=1',
+  'purchase_cancelled=1',
+]);
+
+/** Dove rimanda /api/app-return (null = richiesta non valida). */
+function appReturnTarget(query) {
+  return APP_RETURN_QUERIES.has(query) ? `populive://app/?${query}` : null;
+}
+
 // Quanto resta aperta la pagina di pagamento di Stripe (il minimo che
 // Stripe accetta): oltre, l'acquisto è abbandonato. Corta apposta, per
 // ridurre i pagamenti che arrivano a serata finita.
@@ -61,7 +97,7 @@ const CHECKOUT_EXPIRES_MINUTES = 30;
  * e prima della chiusura. Account di prova: accredito subito, senza
  * Stripe (come prima).
  */
-async function initiateNightPulsePurchase({ userId, arenaSessionId, quantity }, { db }) {
+async function initiateNightPulsePurchase({ userId, arenaSessionId, quantity, appReturn = false }, { db }) {
   if (!Number.isInteger(quantity) || quantity < 1 || quantity > MAX_PULSES_PER_PURCHASE) {
     return { success: false, reason: 'invalid_quantity' };
   }
@@ -149,8 +185,8 @@ async function initiateNightPulsePurchase({ userId, arenaSessionId, quantity }, 
           metadata: { pulsePurchaseId: purchase.id },
         },
         expires_at: Math.floor(Date.now() / 1000) + CHECKOUT_EXPIRES_MINUTES * 60,
-        success_url: `${FRONTEND_BASE_URL}/?pulse_purchase=done`,
-        cancel_url: `${FRONTEND_BASE_URL}/?pulse_purchase=cancelled`,
+        success_url: checkoutReturnUrl('pulse_purchase=done', appReturn),
+        cancel_url: checkoutReturnUrl('pulse_purchase=cancelled', appReturn),
       },
       // Stessa riga, stessa sessione: un doppio tocco non crea due pagamenti.
       { idempotencyKey: `pulse_purchase_${purchase.id}` }
@@ -333,7 +369,7 @@ async function markCheckoutExpired(checkoutSessionId, { db }) {
  * CATALOGO GENERICO (iap_products) — invariato
  * ============================================================
  */
-async function initiatePurchase({ userId, productId, arenaSessionId }, { db }) {
+async function initiatePurchase({ userId, productId, arenaSessionId, appReturn = false }, { db }) {
   const product = await db.query(
     `
     SELECT * FROM iap_products WHERE id = $1 AND is_active = true
@@ -378,8 +414,8 @@ async function initiatePurchase({ userId, productId, arenaSessionId }, { db }) {
       productId,
       arenaSessionId: arenaSessionId || '',
     },
-    success_url: `${FRONTEND_BASE_URL}/?purchase_sent=1`,
-    cancel_url: `${FRONTEND_BASE_URL}/?purchase_cancelled=1`,
+    success_url: checkoutReturnUrl('purchase_sent=1', appReturn),
+    cancel_url: checkoutReturnUrl('purchase_cancelled=1', appReturn),
   });
 
   return { success: true, requiresPayment: true, checkoutUrl: session.url };
@@ -454,4 +490,5 @@ module.exports = {
   finalizeNightCheckout,
   initiatePurchase,
   handleStripeWebhook,
+  appReturnTarget,
 };
