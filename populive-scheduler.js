@@ -97,15 +97,31 @@ async function runSchedulerTick({ db, redis, io }) {
   } catch (err) {
     console.error('[scheduler] errore nella ricarica saldo Superlike settimanale:', err);
   }
+
+  try {
+    await expirePremium({ db });
+  } catch (err) {
+    console.error('[scheduler] errore nella scadenza del Premium:', err);
+  }
 }
 
+// Premium (11/11): tetto 15 invece di 10.
 async function grantWeeklySuperlikes({ db }) {
   await db.query(`
     UPDATE users
-    SET superlike_balance = LEAST(superlike_balance + 5, 10),
+    SET superlike_balance = LEAST(superlike_balance + 5, CASE WHEN is_premium THEN 15 ELSE 10 END),
         last_superlike_grant_at = last_superlike_grant_at + INTERVAL '7 days'
     WHERE last_superlike_grant_at <= now() - INTERVAL '7 days'
-      AND superlike_balance < 10
+      AND superlike_balance < CASE WHEN is_premium THEN 15 ELSE 10 END
+  `);
+}
+
+// Premium scaduto: prima nessuno lo spegneva (premium_expires_at
+// veniva scritto e mai letto). Trovato l'11/11.
+async function expirePremium({ db }) {
+  await db.query(`
+    UPDATE users SET is_premium = false
+    WHERE is_premium = true AND premium_expires_at IS NOT NULL AND premium_expires_at <= now()
   `);
 }
 

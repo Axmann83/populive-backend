@@ -74,7 +74,7 @@ const SENDER_POINTS = {
 const MAX_DISTINCT_VIEWS_PER_SESSION = 20;
 
 const MULTIPLIERS = {
-  premium: 1.2, // profilo Premium a pagamento
+  premium: 1.5, // profilo Premium a pagamento (1.5x dall'11/11, prima 1.2x)
   founder_global: 1.5, // braccialetto founder — SOLO sul globale, mai sul locale (già deciso)
   sender_share: 0.3, // chi INVIA un'interazione riceve il 30% del punteggio corrispondente
   top_connector_vote: 1.5, // il voto di un Top Connector vale 1.5x — solo la prima volta per persona per like/superlike, sempre per la Pulse (già limitata dal costo reale)
@@ -92,7 +92,9 @@ const MULTIPLIERS = {
 // più che generino punti dovrà acquistarli in app (fase successiva,
 // stesso principio del Wallet "Coming Soon": qui prepariamo il
 // meccanismo, il pagamento vero arriva con la fintech).
-const LIKE_SENDER_FREE_LIMIT = 10;
+// Like inviati che danno punti (2 l'uno) in una serata: 5 dall'11/11
+// (decisione dell'utente), prima 10.
+const LIKE_SENDER_FREE_LIMIT = 5;
 
 /**
  * Moltiplicatore per le 3 scelte facoltative in Impostazioni —

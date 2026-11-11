@@ -486,13 +486,17 @@ async function respondToSuperlike({ interactionId, receiverId, action }, { db, i
 // inviati in questa Arena generano punti a chi li manda. Conta
 // anche eventuali crediti extra acquistati (fase fintech successiva).
 async function isUnderSenderLikeLimit(senderId, arenaSessionId, { db }) {
-  const sentCount = await db.query(
+  // COUNT(*) arriva come riga { count: '3' } (testo): prima si confrontava
+  // l'oggetto con un numero, sempre falso, e nessun mittente prendeva
+  // punti per i Like (trovato l'11/11).
+  const sentRow = await db.query(
     `
-    SELECT COUNT(*) FROM points_ledger
+    SELECT COUNT(*)::int AS count FROM points_ledger
     WHERE user_id = $1 AND arena_session_id = $2 AND source = 'like_received_sent'
   `,
     [senderId, arenaSessionId]
   );
+  const sentCount = sentRow?.count ?? 0;
 
   const purchasedCredits = await getPurchasedLikeCredits(senderId, arenaSessionId, { db });
   const threshold = LIKE_SENDER_FREE_LIMIT + purchasedCredits;
@@ -523,7 +527,8 @@ async function getPurchasedLikeCredits(senderId, arenaSessionId, { db }) {
   `,
     [senderId, arenaSessionId]
   );
-  return result.total || 0;
+  // SUM arriva come testo: senza Number() 5 + '0' faceva '50' (11/11).
+  return Number(result?.total) || 0;
 }
 
 /**
@@ -570,10 +575,14 @@ async function applyPurchaseEffect({ userId, productId, arenaSessionId, external
       expiresAt = new Date(Date.now() + config.duration_days * 24 * 60 * 60 * 1000);
       await db.query(
         `
-        UPDATE users SET is_premium = true, premium_expires_at = $1 WHERE id = $2
+        UPDATE users SET is_premium = true, premium_expires_at = $1,
+          superlike_balance = superlike_balance + 5
+        WHERE id = $2
       `,
         [expiresAt, userId]
       );
+      // +5 Superlike all'attivazione (11/11); poi la ricarica settimanale
+      // arriva fino a 15 invece di 10 (populive-scheduler.js).
       break;
 
     case 'verified_badge':
@@ -1889,6 +1898,7 @@ module.exports = {
   hasUserBlockBetween,
   blockBothDirectionsPermanently,
   hasMatchBetween,
+  isUnderSenderLikeLimit,
   getPendingReceivedInteractions,
   getSentInteractionsHistory,
   getUnseenLikeCenterCount,

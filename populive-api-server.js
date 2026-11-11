@@ -59,6 +59,13 @@ const {
   unsuspendUser,
 } = require('./populive-moderation-logic');
 const {
+  getVerificationStatus,
+  startVerification,
+  submitVerification,
+  listPendingVerifications,
+  reviewVerification,
+} = require('./populive-verification-logic');
+const {
   initiateNightPulsePurchase,
   syncPendingNightPurchases,
   initiatePurchase,
@@ -1061,8 +1068,11 @@ app.post(
 // dallo stesso points_ledger, mai una tabella separata da tenere
 // sincronizzata a mano.
 // ------------------------------------------------------------
+// Dall'11/11 le classifiche richiedono l'accesso (decisione dell'utente):
+// prima nomi e punti erano visibili a chiunque.
 app.get(
   '/api/arenas/:arenaSessionId/ranking',
+  requireOnboarded,
   ah(async (req, res) => {
     const { hashtag, gender } = req.query;
     const threshold = await checkLocalRankingThreshold({ arenaSessionId: req.params.arenaSessionId }, { db });
@@ -1082,6 +1092,7 @@ app.get(
 
 app.get(
   '/api/ranking/global',
+  requireOnboarded,
   ah(async (req, res) => {
     const limit = parseInt(req.query.limit) || 100;
     const { hashtag, gender } = req.query;
@@ -1092,17 +1103,12 @@ app.get(
 
 app.get(
   '/api/users/:userId/ranking-summary',
+  requireOnboarded,
   ah(async (req, res) => {
     const { arenaSessionId } = req.query;
-    // Controllo "morbido": se c'è un token valido sappiamo chi guarda
-    // (utile per il proprietario, che deve vedere sempre i suoi dati
-    // veri), ma non blocchiamo la richiesta se manca — guardare una
-    // classifica resta possibile anche senza login.
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-    const { valid, userId: viewerId } = token ? verifyToken(token) : { valid: false };
+    // Chi guarda serve al proprietario, che vede sempre i suoi dati veri.
     const summary = await getUserRankingSummary(
-      { userId: req.params.userId, arenaSessionId, viewerId: valid ? viewerId : null },
+      { userId: req.params.userId, arenaSessionId, viewerId: req.userId },
       { db }
     );
     res.json({ success: true, summary });
@@ -1523,6 +1529,59 @@ app.get(
   ah(async (req, res) => {
     const status = req.query.status === 'closed' ? 'closed' : 'open';
     res.json(await listReports({ status }, deps));
+  })
+);
+
+// ------------------------------------------------------------
+// BADGE VERIFICATO (lotto 9, 11/11): gratis, selfie con un gesto
+// a caso, revisione di un Architetto (populive-verification-logic.js)
+// ------------------------------------------------------------
+app.get(
+  '/api/verification',
+  requireOnboarded,
+  ah(async (req, res) => {
+    res.json(await getVerificationStatus({ userId: req.userId }, deps));
+  })
+);
+
+app.post(
+  '/api/verification/start',
+  requireOnboarded,
+  ah(async (req, res) => {
+    res.json(await startVerification({ userId: req.userId }, deps));
+  })
+);
+
+app.post(
+  '/api/verification/submit',
+  requireOnboarded,
+  ah(async (req, res) => {
+    res.json(await submitVerification({ userId: req.userId, selfieUrl: req.body?.selfieUrl }, deps));
+  })
+);
+
+app.get(
+  '/api/dashboard/verifications',
+  requireArchitect,
+  ah(async (req, res) => {
+    res.json(await listPendingVerifications({}, deps));
+  })
+);
+
+app.post(
+  '/api/dashboard/verifications/:requestId/review',
+  requireArchitect,
+  ah(async (req, res) => {
+    const result = await reviewVerification(
+      {
+        requestId: req.params.requestId,
+        architectId: req.userId,
+        approve: req.body?.approve === true,
+        rejectReason: req.body?.rejectReason,
+      },
+      deps
+    );
+    res.json(result);
   })
 );
 

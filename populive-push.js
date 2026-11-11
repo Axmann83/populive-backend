@@ -158,6 +158,14 @@ function buildContent(event, { senderName, drinkName, conversationId, extra = {}
     // nella dashboard (Apple chiede di agire entro 24 ore).
     case 'report':
       return { title: 'Nuova segnalazione', body: 'Da controllare nella dashboard', group: 'reports' };
+    // Badge Verificato (lotto 9): agli Architetti la richiesta, a chi
+    // l'ha chiesto l'esito.
+    case 'verification_request':
+      return { title: 'Nuova verifica', body: 'Un selfie da controllare nella dashboard', group: 'verifications' };
+    case 'verification_approved':
+      return { title: 'Profilo verificato ✓', body: "Ora accanto al tuo nome c'è la spunta blu." };
+    case 'verification_rejected':
+      return { title: 'Verifica non riuscita', body: 'Apri il profilo per vedere il motivo e riprovare.' };
     default:
       return null;
   }
