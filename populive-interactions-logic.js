@@ -60,6 +60,10 @@ async function sendInteraction({ senderId, receiverId, arenaSessionId, type, via
     return { success: false, reason: 'historical_board_superlike_only' };
   }
 
+  if (await hasMatchBetween({ userAId: senderId, userBId: receiverId }, { db })) {
+    return { success: false, reason: 'already_matched' };
+  }
+
   // Recuperato PRESTO apposta — serve sia per il controllo dei
   // blocchi qui sotto sia per quello dei doppioni più avanti.
   // Un account di prova non ha MAI nessuno di questi limiti, né i
@@ -721,6 +725,10 @@ async function sendPulse({ senderId, receiverId, arenaSessionId }, { db, redis, 
   if (!arenaSessionId) return { success: false, reason: 'session_required' };
   if (senderId === receiverId) {
     return { success: false, reason: 'cannot_interact_with_self' };
+  }
+
+  if (await hasMatchBetween({ userAId: senderId, userBId: receiverId }, { db })) {
+    return { success: false, reason: 'already_matched' };
   }
 
   // Il blocco manuale (B2) vale anche per gli account di prova.
@@ -1578,6 +1586,31 @@ async function getPermanentlyBlockedPairUserIds({ userId }, { db }) {
  * account di prova, e deve funzionare per davvero.
  * ============================================================
  */
+/**
+ * Match tra due persone (11/11, decisione dell'utente): dopo un match
+ * niente più Like, Superlike né Pulse tra loro, in nessuna serata, per
+ * tutti, anche per gli account di prova (che saltano gli altri blocchi
+ * per poter ripetere le prove). Il match è il blocco reciproco con
+ * motivo 'match' (blockBothDirectionsPermanently) oppure una chat
+ * aperta tra i due (nasce dallo stesso match).
+ */
+async function hasMatchBetween({ userAId, userBId }, { db }) {
+  const row = await db.query(
+    `
+    SELECT 1 FROM blocks
+    WHERE ((blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1))
+      AND reason = 'match'
+    UNION ALL
+    SELECT 1 FROM chat_conversations
+    WHERE ((user_a_id = $1 AND user_b_id = $2) OR (user_a_id = $2 AND user_b_id = $1))
+      AND closed_at IS NULL
+    LIMIT 1
+  `,
+    [userAId, userBId]
+  );
+  return !!row;
+}
+
 async function hasUserBlockBetween({ userAId, userBId }, { db }) {
   const row = await db.query(
     `
@@ -1852,6 +1885,7 @@ module.exports = {
   getPermanentlyBlockedPairUserIds,
   hasUserBlockBetween,
   blockBothDirectionsPermanently,
+  hasMatchBetween,
   getPendingReceivedInteractions,
   getSentInteractionsHistory,
   getUnseenLikeCenterCount,

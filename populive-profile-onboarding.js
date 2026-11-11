@@ -14,6 +14,7 @@
  *      chiamata dal frontend)
  * ============================================================
  */
+const { hasMatchBetween } = require('./populive-interactions-logic');
 
 const MAX_HASHTAGS_PER_USER = 5; // valore indicativo, evita profili con 40 hashtag che rendono inutile il targeting
 
@@ -381,15 +382,10 @@ async function getPublicProfile({ userId, arenaSessionId, viewerId }, { db }) {
   // come blocked_by_receiver, che il frontend tace apposta.
   let relation = null;
   if (viewerId && viewerId !== userId) {
-    const activeChat = await db.query(
-      `
-      SELECT 1 FROM chat_conversations
-      WHERE ((user_a_id = $1 AND user_b_id = $2) OR (user_a_id = $2 AND user_b_id = $1))
-        AND closed_at IS NULL
-      LIMIT 1
-    `,
-      [userId, viewerId]
-    );
+    // Match = blocco 'match' o chat aperta (hasMatchBetween, 11/11):
+    // prima contava solo la chat aperta, e un match con la chat chiusa
+    // lasciava i bottoni accesi.
+    const matched = await hasMatchBetween({ userAId: userId, userBId: viewerId }, { db });
     const sentTonight = arenaSessionId
       ? await db.query(
           `
@@ -402,7 +398,7 @@ async function getPublicProfile({ userId, arenaSessionId, viewerId }, { db }) {
       : null;
     const viewer = await db.query(`SELECT superlike_balance FROM users WHERE id = $1`, [viewerId]);
     relation = {
-      matched: !!activeChat,
+      matched,
       likeSentTonight: !!sentTonight?.like_sent,
       superlikeSentTonight: !!sentTonight?.superlike_sent,
       viewerSuperlikeBalance: viewer?.superlike_balance ?? 0,
