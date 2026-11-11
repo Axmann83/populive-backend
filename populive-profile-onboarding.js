@@ -382,7 +382,7 @@ async function getPublicProfile({ userId, arenaSessionId, viewerId }, { db }) {
   // come blocked_by_receiver, che il frontend tace apposta.
   let relation = null;
   if (viewerId && viewerId !== userId) {
-    // Match = blocco 'match' o chat aperta (hasMatchBetween, 11/11):
+    // Match = blocco 'match' o una chat, anche chiusa (hasMatchBetween, 11/11):
     // prima contava solo la chat aperta, e un match con la chat chiusa
     // lasciava i bottoni accesi.
     const matched = await hasMatchBetween({ userAId: userId, userBId: viewerId }, { db });

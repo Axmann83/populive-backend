@@ -130,11 +130,11 @@ function buildContent(event, { senderName, drinkName, conversationId, extra = {}
     case 'like':
       return { title: 'Nuovo Like', body: 'Qualcuno ti ha messo Like ❤️', group: 'likes' };
     case 'superlike':
-      return { title: 'Superlike ⭐', body: `${name} ti ha mandato un Superlike` };
+      return { title: 'Superlike ⭐', body: `${name} ti ha inviato un Superlike` };
     case 'pulse':
       return {
         title: 'Pulse 🍹',
-        body: drinkName ? `${name} ti ha mandato un Pulse: ${drinkName}` : `${name} ti offre un drink con un Pulse`,
+        body: drinkName ? `${name} ti ha inviato un Pulse: ${drinkName}` : `${name} ti offre un drink con un Pulse`,
       };
     // Un'ora prima della chiusura (M11): Pulse comprate e non usate, o
     // drink ricevuti e non ritirati, scadono alla fine della serata.

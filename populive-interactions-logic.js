@@ -1591,8 +1591,11 @@ async function getPermanentlyBlockedPairUserIds({ userId }, { db }) {
  * niente più Like, Superlike né Pulse tra loro, in nessuna serata, per
  * tutti, anche per gli account di prova (che saltano gli altri blocchi
  * per poter ripetere le prove). Il match è il blocco reciproco con
- * motivo 'match' (blockBothDirectionsPermanently) oppure una chat
- * aperta tra i due (nasce dallo stesso match).
+ * motivo 'match' (blockBothDirectionsPermanently) oppure una chat tra i
+ * due, aperta o chiusa: nasce solo da un match (tranne le chat
+ * 'admin_direct' degli Architetti). La chat serve perché il blocco
+ * 'match' può sparire: Blocca lo trasforma in 'user_blocked' e Sblocca
+ * lo cancella (trovato nel simulatore l'11/11, Claudio e Claudio_2).
  */
 async function hasMatchBetween({ userAId, userBId }, { db }) {
   const row = await db.query(
@@ -1603,7 +1606,7 @@ async function hasMatchBetween({ userAId, userBId }, { db }) {
     UNION ALL
     SELECT 1 FROM chat_conversations
     WHERE ((user_a_id = $1 AND user_b_id = $2) OR (user_a_id = $2 AND user_b_id = $1))
-      AND closed_at IS NULL
+      AND unlocked_via IS DISTINCT FROM 'admin_direct'
     LIMIT 1
   `,
     [userAId, userBId]
